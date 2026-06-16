@@ -14,7 +14,7 @@
     "dev:agent": "pnpm --filter reference-agent dev",
     "dev:all": "pnpm --parallel --filter sentinel-proxy --filter attack-server dev",
     "typecheck": "pnpm -r exec tsc --noEmit",
-    "test": "pnpm --filter sentinel-proxy exec node --import tsx --test test/"
+    "test": "pnpm --filter sentinel-proxy test"
   },
   "devDependencies": {
     "@types/node": "^22",
