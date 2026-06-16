@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "test": "node --test test/"
+    "test": "node --import tsx --test test/"
   },
   "dependencies": {
     "@sentinel/shared": "workspace:*",
