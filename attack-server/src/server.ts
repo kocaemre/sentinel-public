@@ -38,9 +38,11 @@ export function buildMockUpstream(): FastifyInstance {
     tick();
   });
 
-  // x402 paid resource (Plan 02 plug point). First hit → 402 + requirements;
-  // retry with X-PAYMENT → 200 + X-PAYMENT-RESPONSE.
+  // x402 paid resource (Plan 02). First hit → 402 + requirements; retry with
+  // X-PAYMENT → 200 + X-PAYMENT-RESPONSE. The mock counts hits per path so the
+  // e2e can assert exactly two upstream hits (402 then X-PAYMENT→200).
   app.get("/paid", (req, reply) => {
+    bumpHit(app, "/paid");
     if (req.headers["x-payment"]) {
       const settle = Buffer.from(
         JSON.stringify({ success: true, transaction: "0xMOCKTX", network: "arc-testnet" }),
@@ -49,25 +51,77 @@ export function buildMockUpstream(): FastifyInstance {
         .header("X-PAYMENT-RESPONSE", settle)
         .send({ data: "protected resource (paid)" });
     }
-    return reply.code(402).send({
-      x402Version: 1,
-      accepts: [
-        {
-          scheme: "exact",
-          network: "arc-testnet", // Arc → proves the Arc-permissive schema in Plan 02
-          maxAmountRequired: "1000",
-          resource: "https://upstream/paid",
-          description: "demo resource",
-          mimeType: "application/json",
-          payTo: "0xPayee",
-          maxTimeoutSeconds: 60,
-          asset: "0xUSDC",
-        },
-      ],
-    });
+    return reply.code(402).send(paymentRequired());
+  });
+
+  // Variant: returns a MALFORMED 402 body (not valid JSON requirements) so the
+  // proxy's parse step fails closed (D-09). Used by the Plan 02 e2e.
+  app.get("/paid-malformed", (req, reply) => {
+    bumpHit(app, "/paid-malformed");
+    if (req.headers["x-payment"]) {
+      // Should never be reached: the proxy must fail closed before retrying.
+      return reply.send({ data: "should not happen" });
+    }
+    reply.code(402).type("application/json").send("this is not valid json {");
+  });
+
+  // Variant: behaves like /paid but records the X-PAYMENT header it receives on
+  // the retry on `app.lastXPayment`, so the e2e can decode + assert its fields.
+  app.get("/paid-capture", (req, reply) => {
+    bumpHit(app, "/paid-capture");
+    const xp = req.headers["x-payment"];
+    if (typeof xp === "string") {
+      (app as WithHits).lastXPayment = xp;
+      return reply.send({ data: "protected resource (paid)" });
+    }
+    return reply.code(402).send(paymentRequired("https://upstream/paid-capture"));
+  });
+
+  // Variant: returns a normal 402 first, then 500 on the X-PAYMENT retry, so the
+  // proxy's retry-error path fails closed and never fabricates a success (D-09).
+  app.get("/paid-retry500", (req, reply) => {
+    bumpHit(app, "/paid-retry500");
+    if (req.headers["x-payment"]) {
+      return reply.code(500).send({ error: "upstream blew up on retry" });
+    }
+    return reply.code(402).send(paymentRequired("https://upstream/paid-retry500"));
   });
 
   return app;
+}
+
+/** The canonical Arc-network 402 requirements body (proves the Arc-permissive schema). */
+function paymentRequired(resource = "https://upstream/paid") {
+  return {
+    x402Version: 1,
+    accepts: [
+      {
+        scheme: "exact",
+        network: "arc-testnet", // Arc → proves the Arc-permissive schema in Plan 02
+        maxAmountRequired: "1000",
+        resource,
+        description: "demo resource",
+        mimeType: "application/json",
+        payTo: "0xPayee",
+        maxTimeoutSeconds: 60,
+        asset: "0xUSDC",
+      },
+    ],
+  };
+}
+
+/**
+ * Per-instance e2e introspection: a per-path hit counter (asserts the two
+ * upstream hits — 402 then X-PAYMENT→200) and the last X-PAYMENT header received.
+ */
+type WithHits = FastifyInstance & {
+  hits?: Record<string, number>;
+  lastXPayment?: string;
+};
+function bumpHit(app: FastifyInstance, path: string): void {
+  const a = app as WithHits;
+  if (!a.hits) a.hits = {};
+  a.hits[path] = (a.hits[path] ?? 0) + 1;
 }
 
 const MOCK_PORT = Number(process.env.MOCK_PORT ?? 4021);
