@@ -7,6 +7,8 @@
  * later phases fill them in without renaming anything.
  */
 
+import type { PaymentRequirements } from "./x402-schema.js";
+
 /** The verdict the decision seam returns for a held 402. */
 export interface Verdict {
   /** allow → proceed with X-PAYMENT; block → refuse; step-up → human-in-the-loop (Phase 2+). */
@@ -16,19 +18,15 @@ export interface Verdict {
 }
 
 /**
- * The typed input the decision seam receives in Plan 02.
+ * The typed input the decision seam receives.
  *
- * Kept intentionally minimal for Plan 01: the parsed x402 PaymentRequirements
- * slot is `unknown` here (Plan 02 Task 1 introduces the Arc-permissive schema in
- * `packages/shared/src/x402-schema.ts` and tightens this type) and the upstream
- * target host is captured so policy/velocity logic in Phase 2 can key on it.
+ * Carries the parsed, Arc-permissive `PaymentRequirements` (Plan 02 filled in the
+ * `unknown` slot from Plan 01 now that the shared schema exists) and the upstream
+ * target host so policy/velocity logic in Phase 2 can key on it.
  */
 export interface DecisionContext {
   /** The decoded upstream host (e.g. `api.foo.com`) the agent is paying. */
   targetHost: string;
-  /**
-   * The parsed x402 PaymentRequirements. Forward-declared as `unknown` in Plan 01;
-   * Plan 02 replaces this with the typed `PaymentRequirements` from the shared schema.
-   */
-  requirements: unknown;
+  /** The parsed, Arc-permissive x402 payment requirements held from the 402. */
+  requirements: PaymentRequirements;
 }
