@@ -1,0 +1,19 @@
+{
+  "name": "sentinel-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@sentinel/shared": "workspace:*",
+    "fastify": "^5",
+    "pino": "^9",
+    "undici": "^6",
+    "x402": "^1.2",
+    "zod": "^3.24"
+  }
+}

@@ -1,0 +1,5 @@
+packages:
+  - 'proxy'
+  - 'attack-server'
+  - 'reference-agent'
+  - 'packages/*'

@@ -1,0 +1,13 @@
+{
+  "name": "reference-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/agent.ts",
+    "start": "tsx src/agent.ts"
+  },
+  "dependencies": {
+    "@sentinel/shared": "workspace:*"
+  }
+}
