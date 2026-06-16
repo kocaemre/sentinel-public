@@ -50,6 +50,12 @@ test("assertAllowed: SSRF guard rejects internal hosts even when allowlisted", (
     "https://192.168.1.1/",
     "https://172.16.0.1/",
     "http://[::1]/",
+    // IPv4-mapped IPv6 — Node normalizes these to hex (e.g. [::ffff:7f00:1]); the
+    // guard must reconstruct the embedded IPv4 and still reject (T-01-01 / CR-01).
+    "http://[::ffff:127.0.0.1]/", // loopback
+    "http://[::ffff:10.0.0.1]/", // RFC1918
+    "http://[::ffff:192.168.1.1]/", // RFC1918
+    "http://[::ffff:169.254.169.254]/", // cloud metadata
   ];
   for (const url of cases) {
     const u = new URL(url);
@@ -60,6 +66,13 @@ test("assertAllowed: SSRF guard rejects internal hosts even when allowlisted", (
       `expected SSRF rejection for ${url}`,
     );
   }
+});
+
+test("assertAllowed: IPv4-mapped IPv6 of a PUBLIC address is not falsely blocked", () => {
+  // [::ffff:8.8.8.8] → "::ffff:808:808"; must decode to 8.8.8.8 (public) and pass the SSRF guard.
+  const u = new URL("http://[::ffff:8.8.8.8]/");
+  const allow = new Set([u.host]);
+  assert.doesNotThrow(() => assertAllowed(u, allow));
 });
 
 test("assertAllowed: allowInternal=true permits a localhost upstream for local dev", () => {

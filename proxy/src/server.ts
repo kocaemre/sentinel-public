@@ -45,10 +45,14 @@ export function buildServer(config: Config): FastifyInstance {
     try {
       await forwardAndStream(target, request, reply);
     } finally {
+      // Honest audit trail: log the ACTUAL response status, not an unconditional
+      // "forwarded". On a hijacked success the status is on reply.raw; on a
+      // fail-closed / decision-block it is reply.statusCode (T-01-07 audit gap).
+      const statusCode = reply.raw.headersSent ? reply.raw.statusCode : reply.statusCode;
       const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
       request.log.info(
-        { targetHost: target.host, method: request.method, elapsedMs: Number(elapsedMs.toFixed(2)) },
-        "forwarded",
+        { targetHost: target.host, method: request.method, statusCode, elapsedMs: Number(elapsedMs.toFixed(2)) },
+        "request complete",
       );
     }
   });

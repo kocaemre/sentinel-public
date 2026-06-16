@@ -88,3 +88,38 @@ test("upstream retry 500: fails closed, never fabricates a success (D-09)", asyn
   // Hit twice: the initial 402 and the retry that 500s.
   assert.equal(mock.hits?.["/paid-retry500"], 2);
 });
+
+test("unreachable upstream: transport error fails closed with a controlled 502, not an uncaught throw (T-01-07/CR-02)", async () => {
+  // Reserve a port, then close it so connections are refused (ECONNREFUSED).
+  const { createServer } = await import("node:net");
+  const deadPort = await new Promise<number>((resolve) => {
+    const s = createServer();
+    s.listen(0, "127.0.0.1", () => {
+      const p = (s.address() as AddressInfo).port;
+      s.close(() => resolve(p));
+    });
+  });
+
+  const config: Config = {
+    allowlist: [`127.0.0.1:${deadPort}`],
+    allowSet: new Set([`127.0.0.1:${deadPort}`]),
+    port: 0,
+    logLevel: "silent",
+    allowInternal: true,
+  };
+  const deadProxy = buildServer(config);
+  await deadProxy.listen({ port: 0, host: "127.0.0.1" });
+  const deadProxyPort = (deadProxy.server.address() as AddressInfo).port;
+
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:${deadProxyPort}/http://127.0.0.1:${deadPort}/anything`,
+    );
+    assert.equal(res.status, 502, "unreachable upstream must fail closed with the controlled 502 shape");
+    const body = (await res.json()) as { error: string; reason: string };
+    assert.equal(body.error, "payment blocked (fail-closed)");
+    assert.match(body.reason, /upstream unreachable/);
+  } finally {
+    await deadProxy.close();
+  }
+});

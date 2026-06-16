@@ -48,11 +48,21 @@ export async function forwardAndStream(
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   const reqBody = hasBody ? (req.body as Buffer | undefined) : undefined;
 
-  const upstream = await request(target.href, {
-    method,
-    headers: forwardableHeaders(req.headers) as Record<string, string | string[]>,
-    body: reqBody,
-  });
+  // undici request() REJECTS on transport-level failure (DNS, ECONNREFUSED, TLS,
+  // reset, timeout). Wrap it so an unreachable upstream fails closed with the
+  // controlled 502 shape + an audit log, instead of escaping into Fastify's
+  // default error handler (T-01-07 / CR-02).
+  let upstream: Dispatcher.ResponseData;
+  try {
+    upstream = await request(target.href, {
+      method,
+      headers: forwardableHeaders(req.headers) as Record<string, string | string[]>,
+      body: reqBody,
+    });
+  } catch (err) {
+    req.log.warn({ err: (err as Error).message, host: target.host }, "upstream unreachable — fail-closed");
+    return failClosed(reply, "upstream unreachable");
+  }
 
   // ── SLOW PATH (402): x402 hold → parse → decide → build → replay → return ──
   if (upstream.statusCode === 402) {
@@ -93,15 +103,23 @@ export async function forwardAndStream(
       return failClosed(reply, "cannot build X-PAYMENT");
     }
 
-    // (5) Replay the request to upstream WITH the X-PAYMENT header.
-    const retry = await request(target.href, {
-      method,
-      headers: {
-        ...(forwardableHeaders(req.headers) as Record<string, string | string[]>),
-        "X-PAYMENT": xPayment,
-      },
-      body: reqBody,
-    });
+    // (5) Replay the request to upstream WITH the X-PAYMENT header. A transport
+    // failure on the replay must fail closed too — never fabricate a paid 200
+    // and never leak an uncontrolled error (T-01-07 / CR-02).
+    let retry: Dispatcher.ResponseData;
+    try {
+      retry = await request(target.href, {
+        method,
+        headers: {
+          ...(forwardableHeaders(req.headers) as Record<string, string | string[]>),
+          "X-PAYMENT": xPayment,
+        },
+        body: reqBody,
+      });
+    } catch (err) {
+      req.log.warn({ err: (err as Error).message, host: target.host }, "X-PAYMENT replay unreachable — fail-closed");
+      return failClosed(reply, "upstream unreachable on payment replay");
+    }
 
     // (6) Any retry error fails closed — never fabricate a 200 (D-09).
     if (retry.statusCode >= 400) {

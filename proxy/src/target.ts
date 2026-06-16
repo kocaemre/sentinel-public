@@ -48,8 +48,25 @@ function isInternalHost(hostname: string): boolean {
 
   if (host === "localhost" || host.endsWith(".localhost")) return true;
   if (host === "::1" || host === "::") return true;
-  // IPv4-mapped IPv6 loopback / link-local
-  if (host.startsWith("::ffff:")) return isInternalHost(host.slice("::ffff:".length));
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d). The WHATWG URL parser normalizes the mapped
+  // form to TWO 16-bit hex groups (e.g. [::ffff:127.0.0.1] → "::ffff:7f00:1"), so we
+  // must reconstruct the embedded IPv4 from those hex groups before range-checking —
+  // not just handle the dotted-quad textual tail, which the parser rarely preserves.
+  if (host.startsWith("::ffff:")) {
+    const suffix = host.slice("::ffff:".length);
+    // Textual dotted-quad tail: ::ffff:127.0.0.1
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(suffix)) return isInternalHost(suffix);
+    // Hex form Node normalizes to: ::ffff:HHHH:HHHH (leading zeros dropped).
+    const groups = suffix.split(":");
+    if (groups.length === 2 && groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) {
+      const high = parseInt(groups[0], 16);
+      const low = parseInt(groups[1], 16);
+      const dotted = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+      return isInternalHost(dotted);
+    }
+    // Any other ::ffff: shape is anomalous for a payment target → fail-closed (treat as internal).
+    return true;
+  }
   // IPv6 unique-local (fc00::/7) and link-local (fe80::/10)
   if (/^f[cd][0-9a-f]{2}:/.test(host)) return true;
   if (/^fe[89ab][0-9a-f]:/.test(host)) return true;
