@@ -46,7 +46,7 @@ test("parsePaymentRequired: missing required fields throws (Zod safeParse failur
   assert.throws(() => parsePaymentRequired(JSON.stringify({ accepts: [{ scheme: "exact" }] })));
 });
 
-test("decide: a legit under-cap, correctly-priced payment is allowed (Phase 2 seam)", () => {
+test("decide: a legit under-cap, correctly-priced payment is allowed (Phase 2 seam)", async () => {
   // 1000 atomic (0.001 USDC) for /paid (expected 1000) → under the per-call cap
   // and not an overpayment, so the deterministic gate allows it.
   const ctx: DecisionContext = {
@@ -57,5 +57,5 @@ test("decide: a legit under-cap, correctly-priced payment is allowed (Phase 2 se
     resourceId: ARC_REQS.resource,
     resource: ARC_REQS.resource,
   };
-  assert.deepEqual(decide(ctx), { decision: "allow" });
+  assert.deepEqual(await decide(ctx), { decision: "allow" });
 });

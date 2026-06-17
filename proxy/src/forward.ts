@@ -110,7 +110,7 @@ export async function forwardAndStream(
     const requirements = ctx.requirements;
 
     // (3) Decision seam (Phase 2 deterministic gate: PRE → [judge slot] → POST).
-    const verdict = decide(ctx);
+    const verdict = await decide(ctx);
     if (verdict.decision !== "allow") {
       req.log.info(
         { decision: verdict.decision, reasons: verdict.reasons, control: verdict.control },
@@ -127,6 +127,8 @@ export async function forwardAndStream(
           reasons: verdict.reasons,
           control: verdict.control,
           protectedAmountAtomic: verdict.protectedAmountAtomic,
+          matched_attack: verdict.matched_attack,
+          injection_detected: verdict.injection_detected,
         });
       return;
     }

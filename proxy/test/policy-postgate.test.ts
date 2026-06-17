@@ -115,27 +115,27 @@ test("tighten: an injected allow can NEVER loosen a block", () => {
 
 // ── decide(): PRE → [judge slot] → POST, judge can't loosen ─────────────────
 
-test("decide: legit 0.001 USDC allows; 50 USDC blocks naming a control", () => {
+test("decide: legit 0.001 USDC allows; 50 USDC blocks naming a control", async () => {
   configureDecision({
     perCallCapAtomic: 1_000_000n,
     overpaymentMultiplier: 2,
     expectedPriceMap: { "https://upstream/paid": "1000" },
   });
-  assert.equal(decide(ctx(1000n)).decision, "allow");
-  const v = decide(ctx(50_000_000n));
+  assert.equal((await decide(ctx(1000n))).decision, "allow");
+  const v = await decide(ctx(50_000_000n));
   assert.equal(v.decision, "block");
   assert.ok(v.control, "named control");
 });
 
-test("decide: an injected judge `allow` over a deterministic block stays blocked (POLICY-05)", () => {
+test("decide: an injected judge `allow` over a deterministic block stays blocked (POLICY-05)", async () => {
   configureDecision({
     perCallCapAtomic: 1_000_000n,
     overpaymentMultiplier: 2,
     expectedPriceMap: { "https://upstream/paid": "1000" },
     // Inject a judge that always returns allow — the POST-check must override it.
-    judge: () => ({ decision: "allow" }),
+    judge: async () => ({ decision: "allow" }),
   });
-  const v = decide(ctx(50_000_000n));
+  const v = await decide(ctx(50_000_000n));
   assert.equal(v.decision, "block", "the POST-check re-runs the controls; the injected allow cannot loosen it");
   assert.ok(v.control, "the block still names the deterministic control");
 });
