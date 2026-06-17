@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { loadConfig, type Config } from "./config.js";
 import { decodeTarget, assertAllowed } from "./target.js";
 import { forwardAndStream } from "./forward.js";
+import { configureDecision } from "./decision/stub.js";
 
 /**
  * Build the Sentinel proxy as a Fastify instance.
@@ -14,6 +15,11 @@ import { forwardAndStream } from "./forward.js";
  * Each request is logged with the decoded target host and an elapsed-ms timing.
  */
 export function buildServer(config: Config): FastifyInstance {
+  // Wire this server's resolved limits into the decision seam (PRE/POST gate) so
+  // the per-call cap + overpayment controls evaluate against THIS config's
+  // values/price-map (e2e tests inject an isolating config here — Plan 02).
+  configureDecision(config);
+
   const app = Fastify({ logger: { level: config.logLevel } });
 
   // Passthrough content-type parser: do NOT parse request bodies, just buffer them
