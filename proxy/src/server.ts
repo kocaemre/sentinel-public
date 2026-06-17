@@ -3,6 +3,7 @@ import { loadConfig, type Config } from "./config.js";
 import { decodeTarget, assertAllowed } from "./target.js";
 import { forwardAndStream } from "./forward.js";
 import { configureDecision } from "./decision/stub.js";
+import { makeOpenRouterJudge } from "./judge/adapter.js";
 
 /**
  * Build the Sentinel proxy as a Fastify instance.
@@ -17,8 +18,15 @@ import { configureDecision } from "./decision/stub.js";
 export function buildServer(config: Config): FastifyInstance {
   // Wire this server's resolved limits into the decision seam (PRE/POST gate) so
   // the per-call cap + overpayment controls evaluate against THIS config's
-  // values/price-map (e2e tests inject an isolating config here — Plan 02).
-  configureDecision(config);
+  // values/price-map (e2e tests inject an isolating config here — Plan 02). Plan 03
+  // injects the real hardened OpenRouter judge into the seam's judge slot ONLY when an
+  // OPENROUTER_API_KEY is configured (the live CLI demo). The judge is advisory — the
+  // deterministic POST tighten() remains the hard backstop. With NO key (the offline
+  // e2e / unit path) we inject NO judge, so the seam's identity passthrough runs and
+  // legitimate allows are not fail-closed-blocked by a keyless judge. (At runtime the
+  // judge still fails closed to `block` on any error once a key IS present.)
+  const judge = config.openRouterApiKey ? makeOpenRouterJudge(config) : undefined;
+  configureDecision({ ...config, judge });
 
   const app = Fastify({ logger: { level: config.logLevel } });
 
