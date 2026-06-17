@@ -3,3 +3,8 @@ dist
 *.log
 .env
 .planning/research/.cache/
+
+# Simulated-wallet SQLite store (runtime state — keep out of the repo, RESEARCH Runtime State Inventory)
+*.db
+*.db-wal
+*.db-shm

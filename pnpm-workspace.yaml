@@ -3,3 +3,9 @@ packages:
   - 'attack-server'
   - 'reference-agent'
   - 'packages/*'
+
+# better-sqlite3 ships Node 22 prebuilt binaries via prebuild-install (RESEARCH A1,
+# no local compile). pnpm blocks lifecycle scripts by default; allow it to run
+# prebuild-install so the native .node binary is fetched on install.
+onlyBuiltDependencies:
+  - better-sqlite3
