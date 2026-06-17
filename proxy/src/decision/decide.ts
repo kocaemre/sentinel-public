@@ -36,7 +36,7 @@ const SEVERITY = { allow: 0, "step-up": 1, block: 2 } as const;
  * passthrough (the judge cannot exist yet). Injectable via `configureDecision` so a
  * test can prove an adversarial `allow` cannot loosen the POST gate.
  */
-type Judge = (ctx: DecisionContext, pre: Verdict) => Verdict;
+type Judge = (ctx: DecisionContext, pre: Verdict) => Promise<Verdict>;
 
 /**
  * Limits the seam needs, plus the optional injectable judge and the SQLite db path.
@@ -52,7 +52,7 @@ interface DecisionConfig extends DecisionLimits {
   startingBalanceAtomic?: bigint;
 }
 
-const identityJudge: Judge = (_ctx, pre) => pre;
+const identityJudge: Judge = async (_ctx, pre) => pre;
 
 /**
  * The post-settlement commit handles forward.ts needs (RESEARCH Pitfall 2): the
@@ -144,7 +144,7 @@ export function tighten(a: Verdict, b: Verdict): Verdict {
 /**
  * The single decision the proxy makes per held 402. PRE → [judge] → POST, monotonic.
  */
-export function decide(ctx: DecisionContext): Verdict {
+export async function decide(ctx: DecisionContext): Promise<Verdict> {
   const cfg = resolved();
 
   // 1. PRE: deterministic gate. A block here short-circuits — no judge, no spend.
@@ -154,7 +154,7 @@ export function decide(ctx: DecisionContext): Verdict {
   // 2. JUDGE slot (Phase 3). Phase 2: identity passthrough. The judge is advisory
   //    and can be adversarial — the POST pass below is what actually enforces.
   const judge = cfg.judge ?? identityJudge;
-  const judged = judge(ctx, pre);
+  const judged = await judge(ctx, pre);
 
   // 3. POST: re-run the deterministic controls; tighten() lets the verdict only
   //    equal-or-tighten, so an injected `allow` can never loosen a real block.
