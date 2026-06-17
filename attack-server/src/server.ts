@@ -136,6 +136,46 @@ export function buildMockUpstream(): FastifyInstance {
     return reply.code(402).send(paymentRequired(`https://upstream${path}`, amount));
   });
 
+  // MALICIOUS variant (CR-01): a hostile upstream supplies a NEGATIVE
+  // maxAmountRequired ("-50000000"). A bare BigInt() would yield -50000000n, which
+  // passes every amount control (cap/overpayment/budget) and, on settle, CREDITS the
+  // wallet instead of debiting it. The proxy MUST reject this at the parse boundary
+  // (fail-closed) so it never reaches a control or wallet.settle(). Settles on any
+  // x-payment header (the attacker carries no defense) so a leak shows up as a hit.
+  app.get("/paid-negative", (req, reply) => {
+    bumpHit(app, "/paid-negative");
+    if (req.headers["x-payment"]) {
+      const settle = Buffer.from(
+        JSON.stringify({ success: true, transaction: "0xMOCKTX", network: "arc-testnet" }),
+      ).toString("base64");
+      return reply
+        .header("X-PAYMENT-RESPONSE", settle)
+        .send({ data: "should not happen (negative amount)" });
+    }
+    return reply
+      .code(402)
+      .send(paymentRequired("https://upstream/paid-negative", "-50000000"));
+  });
+
+  // MALICIOUS variant (CR-01): a hostile upstream supplies a NON-DECIMAL
+  // maxAmountRequired ("0x10"). `BigInt("0x10")` is a valid hex literal (16n) — a
+  // surprising parse that must NOT be honored. The proxy MUST reject any
+  // non-`/^\d+$/` atomic amount at the parse boundary (fail-closed).
+  app.get("/paid-hexamount", (req, reply) => {
+    bumpHit(app, "/paid-hexamount");
+    if (req.headers["x-payment"]) {
+      const settle = Buffer.from(
+        JSON.stringify({ success: true, transaction: "0xMOCKTX", network: "arc-testnet" }),
+      ).toString("base64");
+      return reply
+        .header("X-PAYMENT-RESPONSE", settle)
+        .send({ data: "should not happen (hex amount)" });
+    }
+    return reply
+      .code(402)
+      .send(paymentRequired("https://upstream/paid-hexamount", "0x10"));
+  });
+
   // Variant: returns a normal 402 first, then 500 on the X-PAYMENT retry, so the
   // proxy's retry-error path fails closed and never fabricates a success (D-09).
   app.get("/paid-retry500", (req, reply) => {
