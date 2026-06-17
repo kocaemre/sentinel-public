@@ -51,6 +51,29 @@ export const ConfigSchema = z.object({
   denylist: z.array(z.string().min(1)),
   /** Shared simulated-wallet SQLite path (same file Plan 01's wallet uses). */
   dbPath: z.string().min(1),
+
+  // ── LLM judge (Plan 03-02 OpenRouter adapter) ───────────────────────────────
+  /**
+   * OpenRouter model id the judge calls. CONFIG-SWAPPABLE (JUDGE-02): A/B or swap
+   * to a sponsor credit by changing one env var. Defaults to a cheap, JSON/
+   * structured-output-capable id verified live on openrouter.ai/models — NOT a
+   * `:free` model (D-08: free tiers throttle/route to schema-ignoring providers).
+   */
+  judgeModel: z.string().min(1),
+  /** OpenRouter OpenAI-compatible base URL. Default https://openrouter.ai/api/v1. */
+  openRouterBaseUrl: z.string().url(),
+  /**
+   * OpenRouter API key (service secret — env ONLY, never logged). Allowed EMPTY at
+   * config-load: the offline e2e path injects a stub judge and never calls OpenRouter.
+   * The adapter fails closed to `block` at call time when this is empty, so a live
+   * call without a key NEVER silently allows (RESEARCH Runtime State).
+   */
+  openRouterApiKey: z.string(),
+  /**
+   * Judge call timeout in ms. On expiry the adapter aborts and fails closed to
+   * `block` (D-05). A snappy ceiling — the judge sits on every payment's hot path.
+   */
+  judgeTimeoutMs: z.number().int().positive(),
 });
 
 export type Config = z.infer<typeof ConfigSchema> & {
@@ -72,6 +95,11 @@ const DEFAULT_VELOCITY_LIMIT = 5;
 const DEFAULT_VELOCITY_WINDOW_MS = 60000;
 const DEFAULT_OVERPAYMENT_MULT = 2;
 const DEFAULT_DB_PATH = "sentinel-wallet.db"; // shared with Plan 01's wallet (gitignored)
+// Cheap, JSON/structured-output-capable judge model verified live on
+// openrouter.ai/models (2026-06-17). NOT a `:free` id (D-08). Swap via env.
+const DEFAULT_JUDGE_MODEL = "google/gemini-2.5-flash";
+const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+const DEFAULT_JUDGE_TIMEOUT_MS = 4000; // snappy hot-path ceiling; tune per model latency
 // Legit /paid resource sells for 0.001 USDC (1000 atomic) — the overpayment baseline.
 const DEFAULT_PRICE_MAP: Record<string, string> = {
   "https://upstream/paid": "1000",
@@ -94,6 +122,10 @@ const DEFAULT_PRICE_MAP: Record<string, string> = {
  *  - SENTINEL_PRICE_MAP     : JSON {resource: atomic-string} (default the legit /paid baseline)
  *  - SENTINEL_DENYLIST      : comma-separated denied counterparties (default empty)
  *  - SENTINEL_DB_PATH       : shared wallet SQLite path (default sentinel-wallet.db)
+ *  - SENTINEL_JUDGE_MODEL   : OpenRouter judge model id (default google/gemini-2.5-flash; config-swappable)
+ *  - SENTINEL_OPENROUTER_BASE_URL: OpenRouter base URL (default https://openrouter.ai/api/v1)
+ *  - OPENROUTER_API_KEY     : OpenRouter API key (SECRET, never logged; default "" → adapter fails closed)
+ *  - SENTINEL_JUDGE_TIMEOUT_MS: judge call timeout in ms (default 4000)
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const rawAllow = (env.SENTINEL_ALLOWLIST ?? `localhost:${DEFAULT_MOCK_PORT}`)
@@ -129,6 +161,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     expectedPriceMap: priceMap,
     denylist: rawDeny,
     dbPath: env.SENTINEL_DB_PATH ?? DEFAULT_DB_PATH,
+    // LLM judge (Plan 03-02). The API key is read straight from env and NEVER logged.
+    judgeModel: env.SENTINEL_JUDGE_MODEL ?? DEFAULT_JUDGE_MODEL,
+    openRouterBaseUrl: env.SENTINEL_OPENROUTER_BASE_URL ?? DEFAULT_OPENROUTER_BASE_URL,
+    openRouterApiKey: env.OPENROUTER_API_KEY ?? "",
+    judgeTimeoutMs: env.SENTINEL_JUDGE_TIMEOUT_MS
+      ? Number(env.SENTINEL_JUDGE_TIMEOUT_MS)
+      : DEFAULT_JUDGE_TIMEOUT_MS,
   };
 
   const parsed = ConfigSchema.parse(candidate); // throws ZodError on malformed config → fail-closed

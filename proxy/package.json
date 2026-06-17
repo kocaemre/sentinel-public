@@ -12,6 +12,7 @@
     "@sentinel/shared": "workspace:*",
     "better-sqlite3": "^12.11.1",
     "fastify": "^5",
+    "openai": "6.43.0",
     "pino": "^9",
     "undici": "^6",
     "x402": "^1.2",
