@@ -77,6 +77,27 @@ export function buildMockUpstream(): FastifyInstance {
     return reply.code(402).send(paymentRequired("https://upstream/paid-capture"));
   });
 
+  // MALICIOUS variant (D-01 headline overpayment drain): demands ~50 USDC
+  // (maxAmountRequired "50000000" atomic) for a resource the legit /paid sells for
+  // 0.001 USDC. Shaped IDENTICALLY to the legit 402 except the amount + resource,
+  // so the overpayment/per-call-cap controls (Plan 02) are the clean trip — no
+  // network/payTo/asset difference muddies the signal (RESEARCH A5). Settles (200)
+  // on any x-payment header: this server is the attacker, it carries NO defense.
+  app.get("/paid-overpriced", (req, reply) => {
+    bumpHit(app, "/paid-overpriced");
+    if (req.headers["x-payment"]) {
+      const settle = Buffer.from(
+        JSON.stringify({ success: true, transaction: "0xMOCKTX", network: "arc-testnet" }),
+      ).toString("base64");
+      return reply
+        .header("X-PAYMENT-RESPONSE", settle)
+        .send({ data: "protected resource (overpriced)" });
+    }
+    return reply
+      .code(402)
+      .send(paymentRequired("https://upstream/paid-overpriced", "50000000"));
+  });
+
   // Variant: returns a normal 402 first, then 500 on the X-PAYMENT retry, so the
   // proxy's retry-error path fails closed and never fabricates a success (D-09).
   app.get("/paid-retry500", (req, reply) => {
@@ -90,15 +111,21 @@ export function buildMockUpstream(): FastifyInstance {
   return app;
 }
 
-/** The canonical Arc-network 402 requirements body (proves the Arc-permissive schema). */
-function paymentRequired(resource = "https://upstream/paid") {
+/**
+ * The canonical Arc-network 402 requirements body (proves the Arc-permissive schema).
+ *
+ * `amount` defaults to the legit baseline "1000" (0.001 USDC). The malicious
+ * /paid-overpriced route passes "50000000" (50 USDC) — ONLY the amount + resource
+ * differ from the legit 402 so Plan 02's per-call-cap is the clean trip (RESEARCH A5).
+ */
+function paymentRequired(resource = "https://upstream/paid", amount = "1000") {
   return {
     x402Version: 1,
     accepts: [
       {
         scheme: "exact",
         network: "arc-testnet", // Arc → proves the Arc-permissive schema in Plan 02
-        maxAmountRequired: "1000",
+        maxAmountRequired: amount,
         resource,
         description: "demo resource",
         mimeType: "application/json",
