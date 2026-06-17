@@ -165,15 +165,20 @@ export async function forwardAndStream(
       return failClosed(reply, `upstream retry ${retry.statusCode}`);
     }
 
-    // ── POST-SETTLEMENT COMMIT (RESEARCH Pitfall 2) ──────────────────────────
+    // ── POST-SETTLEMENT COMMIT (RESEARCH Pitfall 2, CR-02) ───────────────────
     // The upstream 200 means the payment SETTLED. Commit ONCE here — never on the
     // block branch above, never on the fail-closed retry branch (those returned
-    // early). recordSettlement feeds the rolling-window budget/velocity ledger and
-    // wallet.settle debits the simulated balance, so both reflect only CONFIRMED
-    // settlements. The replay dedup-mark already committed once in decide() at the
-    // allow decision (the request-identity commit); this is the value commit.
+    // early). All three commits reflect only CONFIRMED settlements:
+    //   • dedup.markFirstSeen — the replay request-identity mark. Bound to SETTLEMENT
+    //     (here), NOT to the allow decision (CR-02): a payment allowed-but-failed
+    //     before settlement must NOT block the agent's legitimate retry. The read-only
+    //     `wasSeen` check in runControls still blocks a duplicate of a SETTLED payment
+    //     (SC#4). markFirstSeen's INSERT ... ON CONFLICT is the atomic claim.
+    //   • ledger.recordSettlement — feeds the rolling-window budget/velocity ledger.
+    //   • wallet.settle — debits the simulated balance.
     const stores = getCommitStores();
     if (stores) {
+      stores.dedup.markFirstSeen(ctx.paymentId, ctx.resourceId);
       stores.ledger.recordSettlement(ctx.amountAtomic);
       stores.wallet.settle(ctx.amountAtomic);
     }

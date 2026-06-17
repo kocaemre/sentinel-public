@@ -56,13 +56,18 @@ const identityJudge: Judge = (_ctx, pre) => pre;
 
 /**
  * The post-settlement commit handles forward.ts needs (RESEARCH Pitfall 2): the
- * ledger (record the confirmed settlement) and the wallet (debit the balance). Both
- * are opened once at boot in `configureDecision`. Absent until configured with a
- * `dbPath` (the unit tests don't go through forward.ts).
+ * ledger (record the confirmed settlement), the wallet (debit the balance), and the
+ * dedup (mark the canonical request first-seen). All are opened once at boot in
+ * `configureDecision`. Absent until configured with a `dbPath` (the unit tests don't
+ * go through forward.ts).
+ *
+ * CR-02: the dedup mark lives HERE (post-settlement), not at the allow decision, so a
+ * payment that is allowed but never settles does NOT block the legitimate retry.
  */
 interface CommitStores {
   ledger: Ledger;
   wallet: Wallet;
+  dedup: Dedup;
 }
 let commitStores: CommitStores | null = null;
 
@@ -111,7 +116,7 @@ export function configureDecision(config: DecisionConfig): void {
     if (config.startingBalanceAtomic !== undefined) {
       wallet.resetBalance(config.startingBalanceAtomic);
     }
-    commitStores = { ledger, wallet };
+    commitStores = { ledger, wallet, dedup };
   } else {
     commitStores = null;
   }
@@ -156,25 +161,19 @@ export function decide(ctx: DecisionContext): Verdict {
   const post = runControls(ctx, cfg);
   const verdict = tighten(judged, post);
 
-  // 4. COMMIT-once for replay (RESEARCH Pitfall 1): only on the ALLOW path, exactly
-  //    once, do we mark the canonical (paymentId, resourceId) first-seen. The PRE/POST
-  //    evaluate above used the read-only `wasSeen`. If `markFirstSeen` returns false a
-  //    concurrent request won the first-seen race between our POST and this insert —
-  //    block as a replay (belt-and-suspenders for the TOCTOU window, threat T-02-14).
-  if (verdict.decision === "allow" && cfg.dedup) {
-    const firstSeen = cfg.dedup.markFirstSeen(ctx.paymentId, ctx.resourceId);
-    if (!firstSeen) {
-      return {
-        decision: "block",
-        control: "replay",
-        protectedAmountAtomic: ctx.amountAtomic.toString(),
-        reasons: [
-          "replay: a concurrent request already claimed first-seen for this canonical " +
-            `(paymentId, resourceId) for resource ${ctx.resourceId} — duplicate blocked`,
-        ],
-      };
-    }
-  }
-
+  // NOTE (CR-02): the replay first-seen mark is NO LONGER committed here at the allow
+  // decision. The security-relevant event for replay protection is *a settlement
+  // occurred*, not *a decision was reached*. Marking on decision wrongly blocked the
+  // agent's legitimate retry of a payment that was allowed but then FAILED before
+  // settlement (X-PAYMENT build/replay/retry error → fail-closed, no settle). The mark
+  // is now bound to the post-upstream-200 settlement in forward.ts, alongside
+  // recordSettlement/wallet.settle. The read-only `wasSeen` CHECK stays in runControls
+  // (PRE/POST), so a duplicate of an ALREADY-SETTLED payment is still blocked (SC#4).
+  //
+  // SCOPE (CR-03, OUT OF SCOPE): under true concurrency two in-flight identical
+  // requests can both pass `wasSeen` and both settle before either marks. That window
+  // is accepted for the single-process SEQUENTIAL demo (CLAUDE.md) and is deliberately
+  // left as-is; markFirstSeen's INSERT ... ON CONFLICT remains the atomic claim so the
+  // post-200 mark in forward.ts is still belt-and-suspenders against a double-mark.
   return verdict;
 }
