@@ -8,6 +8,11 @@
     "start": "tsx src/agent.ts"
   },
   "dependencies": {
-    "@sentinel/shared": "workspace:*"
+    "@sentinel/shared": "workspace:*",
+    "better-sqlite3": "^12.11.1",
+    "x402": "^1.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
   }
 }
