@@ -117,6 +117,25 @@ export function buildMockUpstream(): FastifyInstance {
     return reply.code(402).send(paymentRequired("https://upstream/paid-stable"));
   });
 
+  // Parameterized legit resource (Plan 03 budget/velocity e2e). `/paid-n/:n` is a
+  // DISTINCT resource per `:n` (so each settles without colliding on the replay
+  // dedup), each priced at the default 0.001 USDC baseline unless `?amount=` is
+  // given (atomic units). Drives many distinct settled payments to fill the rolling
+  // budget/velocity window (POLICY-02/03). 402 → 200 on X-PAYMENT, like /paid.
+  app.get("/paid-n/:n", (req, reply) => {
+    const n = (req.params as { n: string }).n;
+    const path = `/paid-n/${n}`;
+    bumpHit(app, path);
+    if (req.headers["x-payment"]) {
+      const settle = Buffer.from(
+        JSON.stringify({ success: true, transaction: "0xMOCKTX", network: "arc-testnet" }),
+      ).toString("base64");
+      return reply.header("X-PAYMENT-RESPONSE", settle).send({ data: `protected resource (${path})` });
+    }
+    const amount = (req.query as { amount?: string }).amount ?? "1000";
+    return reply.code(402).send(paymentRequired(`https://upstream${path}`, amount));
+  });
+
   // Variant: returns a normal 402 first, then 500 on the X-PAYMENT retry, so the
   // proxy's retry-error path fails closed and never fabricates a success (D-09).
   app.get("/paid-retry500", (req, reply) => {
