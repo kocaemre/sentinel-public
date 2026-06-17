@@ -33,10 +33,21 @@ export function usdcToAtomic(usdc: string | number): bigint {
 
 /**
  * The wire `maxAmountRequired` is ALREADY in atomic units (the x402 spec sends
- * the integer atomic value), so this is a plain `BigInt()` — no scaling.
+ * the integer atomic value), so there is no scaling — but the value is
+ * attacker-controlled (it comes from a possibly-malicious 402 body).
  *
  *   reqAmountAtomic("50000000") === 50000000n
+ *
+ * Defense in depth (CR-01): re-assert the non-negative integer invariant here even
+ * though the Zod schema already constrains the field. A bare `BigInt()` would honor
+ * "-50000000" (negative — defeats every amount cap and CREDITS the wallet on settle),
+ * "0x10" (a valid hex literal), or " 5 " (whitespace), and would throw uncontrolled on
+ * "1e3" deeper in the stack. The `/^\d+$/` guard FAILS CLOSED at the parse boundary —
+ * the caller (forward.ts) catches the throw and returns the controlled 502 shape.
  */
 export function reqAmountAtomic(maxAmountRequired: string): bigint {
+  if (!/^\d+$/.test(maxAmountRequired)) {
+    throw new Error(`invalid atomic amount: ${JSON.stringify(maxAmountRequired)}`);
+  }
   return BigInt(maxAmountRequired);
 }

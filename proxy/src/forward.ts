@@ -78,16 +78,13 @@ export async function forwardAndStream(
       return failClosed(reply, "402 body too large or unreadable");
     }
 
-    // (2) Parse into typed PaymentRequirements — fail-closed on malformed (D-09).
-    let requirements;
-    try {
-      requirements = parsePaymentRequired(raw);
-    } catch (err) {
-      req.log.warn({ err: (err as Error).message }, "unparseable 402 — fail-closed");
-      return failClosed(reply, "unparseable 402");
-    }
-
-    // (3) Decision seam (Phase 2 deterministic gate: PRE → [judge slot] → POST).
+    // (2) Parse into typed PaymentRequirements AND build the decision context —
+    // fail-closed on malformed input or an invalid atomic amount (D-09 / CR-01).
+    //
+    // `reqAmountAtomic` re-asserts the non-negative-integer invariant and THROWS on a
+    // hostile amount ("-50000000", "0x10", "1e3"). It is inside THIS try so a throw
+    // fails closed with the controlled 502 shape instead of escaping to Fastify's
+    // default handler (the bare BigInt() previously ran outside any try/catch).
     //
     // Open Q2 (RESOLVED): compute the canonical HTTP-layer replay identity from
     // the ALREADY-PARSED upstream 402 BEFORE the decision. `paymentId` is
@@ -95,16 +92,24 @@ export async function forwardAndStream(
     // is requirements.resource. The per-call X-PAYMENT nonce STAYS minted inside
     // buildStubXPayment AFTER the decision — it is NOT the replay key (D-11,
     // POLICY-06, threat T-02-17), so no nonce-before-decide restructure is needed.
-    const paymentId = canonicalPaymentId(requirements);
-    const resourceId = requirements.resource;
-    const ctx: DecisionContext = {
-      requirements,
-      targetHost: target.host,
-      amountAtomic: reqAmountAtomic(requirements.maxAmountRequired),
-      paymentId,
-      resourceId,
-      resource: requirements.resource,
-    };
+    let ctx: DecisionContext;
+    try {
+      const requirements = parsePaymentRequired(raw);
+      ctx = {
+        requirements,
+        targetHost: target.host,
+        amountAtomic: reqAmountAtomic(requirements.maxAmountRequired),
+        paymentId: canonicalPaymentId(requirements),
+        resourceId: requirements.resource,
+        resource: requirements.resource,
+      };
+    } catch (err) {
+      req.log.warn({ err: (err as Error).message }, "unparseable 402 — fail-closed");
+      return failClosed(reply, "unparseable 402");
+    }
+    const requirements = ctx.requirements;
+
+    // (3) Decision seam (Phase 2 deterministic gate: PRE → [judge slot] → POST).
     const verdict = decide(ctx);
     if (verdict.decision !== "allow") {
       req.log.info(

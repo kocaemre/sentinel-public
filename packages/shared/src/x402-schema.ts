@@ -22,7 +22,14 @@ import { z } from "zod";
 export const PaymentRequirementsSchema = z.object({
   scheme: z.literal("exact"),
   network: z.string(), // PERMISSIVE — accepts 'arc-testnet', unlike the SDK's closed enum (Pitfall 1)
-  maxAmountRequired: z.string(),
+  // FAIL-CLOSED (CR-01): the 402 body is attacker-controlled, so `maxAmountRequired`
+  // must be a NON-NEGATIVE atomic-unit integer (decimal digits only). A bare
+  // `z.string()` lets a hostile upstream send "-50000000" (negative — passes every
+  // amount cap and CREDITS the wallet on settle) or "0x10" (valid hex BigInt literal).
+  // Constraining to /^\d+$/ rejects both at the parse boundary; the caller fail-closes.
+  maxAmountRequired: z
+    .string()
+    .regex(/^\d+$/, "maxAmountRequired must be a non-negative atomic integer (decimal digits only)"),
   resource: z.string(),
   description: z.string(),
   mimeType: z.string(),
