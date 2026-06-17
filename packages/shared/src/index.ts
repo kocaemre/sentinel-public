@@ -1,4 +1,4 @@
-export type { Verdict, DecisionContext } from "./verdict.js";
+export type { Verdict, DecisionContext, ControlName } from "./verdict.js";
 export {
   PaymentRequirementsSchema,
   parsePaymentRequired,

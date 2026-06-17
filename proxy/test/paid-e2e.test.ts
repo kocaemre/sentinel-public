@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { safeBase64Decode } from "x402/shared";
 import { buildServer } from "../src/server.js";
 import type { Config } from "../src/config.js";
+import { makeTestConfig } from "./helpers/config.js";
 import { buildMockUpstream } from "../../attack-server/src/server.js";
 
 let mock: FastifyInstance & { hits?: Record<string, number>; lastXPayment?: string };
@@ -17,13 +18,7 @@ before(async () => {
   await mock.listen({ port: 0, host: "127.0.0.1" });
   mockPort = (mock.server.address() as AddressInfo).port;
 
-  const config: Config = {
-    allowlist: [`127.0.0.1:${mockPort}`],
-    allowSet: new Set([`127.0.0.1:${mockPort}`]),
-    port: 0,
-    logLevel: "silent",
-    allowInternal: true, // local e2e: the mock lives on loopback
-  };
+  const config: Config = makeTestConfig({ allowlist: [`127.0.0.1:${mockPort}`] });
   proxy = buildServer(config);
   await proxy.listen({ port: 0, host: "127.0.0.1" });
   proxyPort = (proxy.server.address() as AddressInfo).port;
@@ -100,13 +95,7 @@ test("unreachable upstream: transport error fails closed with a controlled 502, 
     });
   });
 
-  const config: Config = {
-    allowlist: [`127.0.0.1:${deadPort}`],
-    allowSet: new Set([`127.0.0.1:${deadPort}`]),
-    port: 0,
-    logLevel: "silent",
-    allowInternal: true,
-  };
+  const config: Config = makeTestConfig({ allowlist: [`127.0.0.1:${deadPort}`] });
   const deadProxy = buildServer(config);
   await deadProxy.listen({ port: 0, host: "127.0.0.1" });
   const deadProxyPort = (deadProxy.server.address() as AddressInfo).port;

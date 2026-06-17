@@ -46,7 +46,16 @@ test("parsePaymentRequired: missing required fields throws (Zod safeParse failur
   assert.throws(() => parsePaymentRequired(JSON.stringify({ accepts: [{ scheme: "exact" }] })));
 });
 
-test("decide: hardcoded stub returns allow for any input (Phase 1 seam)", () => {
-  const ctx: DecisionContext = { targetHost: "upstream", requirements: ARC_REQS };
+test("decide: a legit under-cap, correctly-priced payment is allowed (Phase 2 seam)", () => {
+  // 1000 atomic (0.001 USDC) for /paid (expected 1000) → under the per-call cap
+  // and not an overpayment, so the deterministic gate allows it.
+  const ctx: DecisionContext = {
+    targetHost: "upstream",
+    requirements: ARC_REQS,
+    amountAtomic: 1000n,
+    paymentId: "test-payment-id",
+    resourceId: ARC_REQS.resource,
+    resource: ARC_REQS.resource,
+  };
   assert.deepEqual(decide(ctx), { decision: "allow" });
 });

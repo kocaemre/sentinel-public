@@ -6,6 +6,8 @@ import { forwardableHeaders, stripHopByHop } from "./headers.js";
 import { parsePaymentRequired } from "./x402/parse.js";
 import { buildStubXPayment } from "./x402/build.js";
 import { decide } from "./decision/stub.js";
+import { canonicalPaymentId } from "./policy/identity.js";
+import { reqAmountAtomic } from "./policy/amount.js";
 import type { DecisionContext } from "@sentinel/shared";
 
 /**
@@ -85,12 +87,42 @@ export async function forwardAndStream(
       return failClosed(reply, "unparseable 402");
     }
 
-    // (3) Decision seam (Phase 1 stub → always allow; Phase 2/3 replace it).
-    const ctx: DecisionContext = { requirements, targetHost: target.host };
+    // (3) Decision seam (Phase 2 deterministic gate: PRE → [judge slot] → POST).
+    //
+    // Open Q2 (RESOLVED): compute the canonical HTTP-layer replay identity from
+    // the ALREADY-PARSED upstream 402 BEFORE the decision. `paymentId` is
+    // canonicalPaymentId(requirements) over the STABLE upstream fields; `resourceId`
+    // is requirements.resource. The per-call X-PAYMENT nonce STAYS minted inside
+    // buildStubXPayment AFTER the decision — it is NOT the replay key (D-11,
+    // POLICY-06, threat T-02-17), so no nonce-before-decide restructure is needed.
+    const paymentId = canonicalPaymentId(requirements);
+    const resourceId = requirements.resource;
+    const ctx: DecisionContext = {
+      requirements,
+      targetHost: target.host,
+      amountAtomic: reqAmountAtomic(requirements.maxAmountRequired),
+      paymentId,
+      resourceId,
+      resource: requirements.resource,
+    };
     const verdict = decide(ctx);
     if (verdict.decision !== "allow") {
-      req.log.info({ decision: verdict.decision, reasons: verdict.reasons }, "payment blocked by decision seam");
-      reply.code(402).send({ error: "payment blocked", decision: verdict.decision, reasons: verdict.reasons });
+      req.log.info(
+        { decision: verdict.decision, reasons: verdict.reasons, control: verdict.control },
+        "payment blocked by decision seam",
+      );
+      // Block response carries the NAMED control + the protected atomic amount
+      // (D-09/D-10), with Cache-Control: no-store (CLAUDE.md, never cache a block).
+      reply
+        .code(402)
+        .header("Cache-Control", "no-store")
+        .send({
+          error: "payment blocked",
+          decision: verdict.decision,
+          reasons: verdict.reasons,
+          control: verdict.control,
+          protectedAmountAtomic: verdict.protectedAmountAtomic,
+        });
       return;
     }
 

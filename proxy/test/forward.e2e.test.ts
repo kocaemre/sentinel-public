@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 import type { Config } from "../src/config.js";
+import { makeTestConfig } from "./helpers/config.js";
 import { buildMockUpstream } from "../../attack-server/src/server.js";
 
 let mock: FastifyInstance;
@@ -16,13 +17,7 @@ before(async () => {
   await mock.listen({ port: 0, host: "127.0.0.1" });
   mockPort = (mock.server.address() as AddressInfo).port;
 
-  const config: Config = {
-    allowlist: [`127.0.0.1:${mockPort}`],
-    allowSet: new Set([`127.0.0.1:${mockPort}`]),
-    port: 0,
-    logLevel: "silent",
-    allowInternal: true, // local e2e: the mock lives on loopback
-  };
+  const config: Config = makeTestConfig({ allowlist: [`127.0.0.1:${mockPort}`] });
   proxy = buildServer(config);
   await proxy.listen({ port: 0, host: "127.0.0.1" });
   proxyPort = (proxy.server.address() as AddressInfo).port;
