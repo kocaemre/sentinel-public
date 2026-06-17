@@ -45,6 +45,9 @@ importers:
       '@sentinel/shared':
         specifier: workspace:*
         version: link:../packages/shared
+      better-sqlite3:
+        specifier: ^12.11.1
+        version: 12.11.1
       fastify:
         specifier: ^5
         version: 5.8.5
@@ -60,6 +63,10 @@ importers:
       zod:
         specifier: ^3.24
         version: 3.25.76
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
 
   reference-agent:
     dependencies:
