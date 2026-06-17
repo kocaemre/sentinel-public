@@ -5,7 +5,7 @@ import { decodeXPaymentResponse } from "x402/shared";
 import { forwardableHeaders, stripHopByHop } from "./headers.js";
 import { parsePaymentRequired } from "./x402/parse.js";
 import { buildStubXPayment } from "./x402/build.js";
-import { decide } from "./decision/stub.js";
+import { decide, getCommitStores } from "./decision/stub.js";
 import { canonicalPaymentId } from "./policy/identity.js";
 import { reqAmountAtomic } from "./policy/amount.js";
 import type { DecisionContext } from "@sentinel/shared";
@@ -158,6 +158,19 @@ export async function forwardAndStream(
       await retry.body.dump(); // consume the single-use body
       req.log.warn({ status: retry.statusCode }, "upstream retry failed — fail-closed");
       return failClosed(reply, `upstream retry ${retry.statusCode}`);
+    }
+
+    // ── POST-SETTLEMENT COMMIT (RESEARCH Pitfall 2) ──────────────────────────
+    // The upstream 200 means the payment SETTLED. Commit ONCE here — never on the
+    // block branch above, never on the fail-closed retry branch (those returned
+    // early). recordSettlement feeds the rolling-window budget/velocity ledger and
+    // wallet.settle debits the simulated balance, so both reflect only CONFIRMED
+    // settlements. The replay dedup-mark already committed once in decide() at the
+    // allow decision (the request-identity commit); this is the value commit.
+    const stores = getCommitStores();
+    if (stores) {
+      stores.ledger.recordSettlement(ctx.amountAtomic);
+      stores.wallet.settle(ctx.amountAtomic);
     }
 
     // Audit seed: if the upstream returned a settle header, decode + log it and

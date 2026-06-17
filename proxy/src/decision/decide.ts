@@ -22,8 +22,11 @@
  */
 
 import type { DecisionContext, Verdict } from "@sentinel/shared";
+import { openWallet, type Wallet } from "@sentinel/shared";
 import { loadConfig } from "../config.js";
 import { runControls, type DecisionLimits } from "../policy/engine.js";
+import { openLedger, type Ledger } from "../policy/ledger.js";
+import { openDedup, type Dedup } from "../policy/dedup.js";
 
 /** Severity ordering: a higher number is STRICTER. `tighten()` keeps the stricter. */
 const SEVERITY = { allow: 0, "step-up": 1, block: 2 } as const;
@@ -35,12 +38,38 @@ const SEVERITY = { allow: 0, "step-up": 1, block: 2 } as const;
  */
 type Judge = (ctx: DecisionContext, pre: Verdict) => Verdict;
 
-/** Limits the seam needs, plus the optional injectable judge. */
+/**
+ * Limits the seam needs, plus the optional injectable judge and the SQLite db path.
+ * The server passes its full `Config` (a structural superset); `configureDecision`
+ * opens the ledger/dedup/wallet stores once from `dbPath`. `dbPath` is optional so
+ * the pure unit tests (limits-only) still configure without touching SQLite.
+ */
 interface DecisionConfig extends DecisionLimits {
   judge?: Judge;
+  /** Shared SQLite path for the ledger/dedup/wallet stores (Plan 03). */
+  dbPath?: string;
+  /** Wallet starting balance in atomic units, reset once at boot (Plan 01/03). */
+  startingBalanceAtomic?: bigint;
 }
 
 const identityJudge: Judge = (_ctx, pre) => pre;
+
+/**
+ * The post-settlement commit handles forward.ts needs (RESEARCH Pitfall 2): the
+ * ledger (record the confirmed settlement) and the wallet (debit the balance). Both
+ * are opened once at boot in `configureDecision`. Absent until configured with a
+ * `dbPath` (the unit tests don't go through forward.ts).
+ */
+interface CommitStores {
+  ledger: Ledger;
+  wallet: Wallet;
+}
+let commitStores: CommitStores | null = null;
+
+/** Forward.ts reads this to commit the settlement ONCE after the upstream 200. */
+export function getCommitStores(): CommitStores | null {
+  return commitStores;
+}
 
 /**
  * Module-level resolved config. Initialized lazily from `loadConfig()` defaults so
@@ -51,6 +80,9 @@ let active: DecisionConfig | null = null;
 
 function resolved(): DecisionConfig {
   if (active) return active;
+  // Lazily configure from env defaults so unit tests run unwired. This path opens
+  // NO stores (cap/overpayment only) — the stateful controls stay skipped until the
+  // server calls configureDecision() with a dbPath.
   const cfg = loadConfig();
   active = {
     perCallCapAtomic: cfg.perCallCapAtomic,
@@ -61,15 +93,40 @@ function resolved(): DecisionConfig {
 }
 
 /**
- * Wire the resolved limits (and optionally a judge) into the decision seam. The
- * server calls this once at boot with its `Config` (a structural superset of
- * `DecisionConfig`); tests call it with the minimal subset.
+ * Wire the resolved limits (and optionally a judge) into the decision seam, opening
+ * the ledger/dedup/wallet stores ONCE from `config.dbPath`. The server calls this
+ * once at boot with its full `Config` (a structural superset of `DecisionConfig`);
+ * the pure unit tests call it with the limits-only subset (no `dbPath` → no stores,
+ * so the stateful controls are skipped and the seam stays pure).
  */
 export function configureDecision(config: DecisionConfig): void {
+  let ledger: Ledger | undefined;
+  let dedup: Dedup | undefined;
+  if (config.dbPath) {
+    ledger = openLedger(config.dbPath);
+    dedup = openDedup(config.dbPath);
+    const wallet = openWallet(config.dbPath);
+    // Reset the simulated balance to the demo starting point once at boot so the
+    // protected-balance contrast is deterministic across runs (Plan 01 invariant).
+    if (config.startingBalanceAtomic !== undefined) {
+      wallet.resetBalance(config.startingBalanceAtomic);
+    }
+    commitStores = { ledger, wallet };
+  } else {
+    commitStores = null;
+  }
+
   active = {
     perCallCapAtomic: config.perCallCapAtomic,
     overpaymentMultiplier: config.overpaymentMultiplier,
     expectedPriceMap: config.expectedPriceMap,
+    denySet: config.denySet,
+    hourlyBudgetAtomic: config.hourlyBudgetAtomic,
+    dailyBudgetAtomic: config.dailyBudgetAtomic,
+    velocityLimit: config.velocityLimit,
+    velocityWindowMs: config.velocityWindowMs,
+    ledger,
+    dedup,
     judge: config.judge,
   };
 }
@@ -97,5 +154,27 @@ export function decide(ctx: DecisionContext): Verdict {
   // 3. POST: re-run the deterministic controls; tighten() lets the verdict only
   //    equal-or-tighten, so an injected `allow` can never loosen a real block.
   const post = runControls(ctx, cfg);
-  return tighten(judged, post);
+  const verdict = tighten(judged, post);
+
+  // 4. COMMIT-once for replay (RESEARCH Pitfall 1): only on the ALLOW path, exactly
+  //    once, do we mark the canonical (paymentId, resourceId) first-seen. The PRE/POST
+  //    evaluate above used the read-only `wasSeen`. If `markFirstSeen` returns false a
+  //    concurrent request won the first-seen race between our POST and this insert —
+  //    block as a replay (belt-and-suspenders for the TOCTOU window, threat T-02-14).
+  if (verdict.decision === "allow" && cfg.dedup) {
+    const firstSeen = cfg.dedup.markFirstSeen(ctx.paymentId, ctx.resourceId);
+    if (!firstSeen) {
+      return {
+        decision: "block",
+        control: "replay",
+        protectedAmountAtomic: ctx.amountAtomic.toString(),
+        reasons: [
+          "replay: a concurrent request already claimed first-seen for this canonical " +
+            `(paymentId, resourceId) for resource ${ctx.resourceId} — duplicate blocked`,
+        ],
+      };
+    }
+  }
+
+  return verdict;
 }

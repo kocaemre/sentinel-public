@@ -8,4 +8,4 @@
  * fixed seam contract — D-12, POLICY-05). `configureDecision` is re-exported so the
  * server can wire the resolved limits at boot.
  */
-export { decide, configureDecision, tighten } from "./decide.js";
+export { decide, configureDecision, tighten, getCommitStores } from "./decide.js";

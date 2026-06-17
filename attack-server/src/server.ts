@@ -98,6 +98,25 @@ export function buildMockUpstream(): FastifyInstance {
       .send(paymentRequired("https://upstream/paid-overpriced", "50000000"));
   });
 
+  // Stable legit resource (Plan 03 replay e2e + the no-store isolation test). Shaped
+  // exactly like /paid (0.001 USDC, 402 → 200 on X-PAYMENT) but a DISTINCT resource,
+  // so a test needing a fresh first-seen (not the /paid one other tests already
+  // settled) keys on its own canonical (paymentId, resourceId). The body is IDENTICAL
+  // on every 402, so the SAME logical request twice produces the SAME canonical
+  // paymentId — exactly what the replay dedup must collide on (POLICY-06, SC#4).
+  app.get("/paid-stable", (req, reply) => {
+    bumpHit(app, "/paid-stable");
+    if (req.headers["x-payment"]) {
+      const settle = Buffer.from(
+        JSON.stringify({ success: true, transaction: "0xMOCKTX", network: "arc-testnet" }),
+      ).toString("base64");
+      return reply
+        .header("X-PAYMENT-RESPONSE", settle)
+        .send({ data: "protected resource (paid-stable)" });
+    }
+    return reply.code(402).send(paymentRequired("https://upstream/paid-stable"));
+  });
+
   // Variant: returns a normal 402 first, then 500 on the X-PAYMENT retry, so the
   // proxy's retry-error path fails closed and never fabricates a success (D-09).
   app.get("/paid-retry500", (req, reply) => {

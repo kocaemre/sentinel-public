@@ -59,7 +59,11 @@ test("paid: the retry's X-PAYMENT decodes to payTo/value/network matching the pa
 });
 
 test("paid: the final 200 carries Cache-Control: no-store (Pitfall 5)", async () => {
-  const res = await fetch(through("/paid"));
+  // Use /paid-stable (a distinct resource) rather than /paid: Plan 03's replay dedup
+  // is now active and /paid was already settled by the first test in this file
+  // (same canonical paymentId → a second /paid would be a replay block). A fresh
+  // resource is a first-seen, so this isolates the no-store assertion on a 200.
+  const res = await fetch(through("/paid-stable"));
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("cache-control"), "no-store");
   await res.body?.cancel();
