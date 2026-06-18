@@ -27,6 +27,7 @@ import { loadConfig } from "../config.js";
 import { runControls, type DecisionLimits } from "../policy/engine.js";
 import { openLedger, type Ledger } from "../policy/ledger.js";
 import { openDedup, type Dedup } from "../policy/dedup.js";
+import { openAudit, type Audit } from "../policy/audit.js";
 
 /** Severity ordering: a higher number is STRICTER. `tighten()` keeps the stricter. */
 const SEVERITY = { allow: 0, "step-up": 1, block: 2 } as const;
@@ -68,6 +69,12 @@ interface CommitStores {
   ledger: Ledger;
   wallet: Wallet;
   dedup: Dedup;
+  /**
+   * Append-only decision audit log (OBS-01). forward.ts writes ONE row on EVERY
+   * decision — the block branch (settlement_tx NULL) and the settle-gated allow
+   * branch (the real settlement_tx). Opened once here at boot from the same dbPath.
+   */
+  audit: Audit;
 }
 let commitStores: CommitStores | null = null;
 
@@ -111,12 +118,15 @@ export function configureDecision(config: DecisionConfig): void {
     ledger = openLedger(config.dbPath);
     dedup = openDedup(config.dbPath);
     const wallet = openWallet(config.dbPath);
+    // The append-only audit log joins the commit stores so it opens ONCE at boot from
+    // the same SQLite file (OBS-01); forward.ts writes a row on every decision.
+    const audit = openAudit(config.dbPath);
     // Reset the simulated balance to the demo starting point once at boot so the
     // protected-balance contrast is deterministic across runs (Plan 01 invariant).
     if (config.startingBalanceAtomic !== undefined) {
       wallet.resetBalance(config.startingBalanceAtomic);
     }
-    commitStores = { ledger, wallet, dedup };
+    commitStores = { ledger, wallet, dedup, audit };
   } else {
     commitStores = null;
   }
