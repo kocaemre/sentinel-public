@@ -19,13 +19,13 @@
  */
 import "server-only";
 import Database from "better-sqlite3";
-import { makeQueries, type Queries } from "./queries.js";
+import { makeQueries, type Queries } from "./queries";
 
 export type {
   AuditRecord,
   DashboardMetrics,
   AttackBucket,
-} from "./queries.js";
+} from "./queries";
 
 /**
  * Lazily open the shared db read-only and cache the bound queries.

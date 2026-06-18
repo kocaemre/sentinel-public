@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { makeQueries, type Queries } from "./queries.js";
+import { makeQueries, type Queries } from "./queries";
 
 /**
  * Read-path proof for the dashboard's read queries (OBS-02/03).
