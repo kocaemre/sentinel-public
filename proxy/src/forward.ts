@@ -10,6 +10,7 @@ import { canonicalPaymentId } from "./policy/identity.js";
 import { reqAmountAtomic } from "./policy/amount.js";
 import type { DecisionContext } from "@sentinel/shared";
 import type { SettlementAdapter } from "./settlement/adapter.js";
+import type { AuditRow } from "./policy/audit.js";
 
 /**
  * The injected settlement adapter (real↔stub). The server wires it once at boot via
@@ -34,6 +35,24 @@ const MAX_402_BODY_BYTES = 64 * 1024;
 /** Fail-closed: never return the raw 402, never fabricate a paid success (D-09). */
 function failClosed(reply: FastifyReply, reason: string): void {
   reply.code(502).send({ error: "payment blocked (fail-closed)", reason });
+}
+
+/**
+ * Append ONE row to the append-only audit log for a block/step-up decision (OBS-01).
+ *
+ * Defensive by design: the unit/e2e paths that never boot the server have no commit
+ * stores (`getCommitStores()` null), so the write is skipped silently; and a write
+ * failure is logged-and-swallowed — a block return must NEVER be turned into a pass
+ * by an audit error (fail-closed posture, the 402 send below is unconditional).
+ */
+function writeAudit(req: FastifyRequest, row: AuditRow): void {
+  const stores = getCommitStores();
+  if (!stores) return;
+  try {
+    stores.audit.insert(row);
+  } catch (err) {
+    req.log.warn({ err: (err as Error).message }, "audit write failed (block decision unaffected)");
+  }
 }
 
 /**
@@ -134,6 +153,24 @@ export async function forwardAndStream(
         { decision: verdict.decision, reasons: verdict.reasons, control: verdict.control },
         "payment blocked by decision seam",
       );
+      // (OBS-01) Persist the block to the append-only audit log BEFORE the 402 send —
+      // exactly one row per decision (this write is OUTSIDE runControls, so the PRE/POST
+      // double-evaluate never double-writes). settlement_tx is NULL: nothing settled.
+      // ADDITIVE to the pino log + the no-store discipline; a write failure must NEVER
+      // turn a block into a pass (the block return below is unconditional).
+      writeAudit(req, {
+        decided_at: Date.now(),
+        decision: verdict.decision,
+        control: verdict.control ?? null,
+        matched_attack: verdict.matched_attack ?? null,
+        injection_detected: verdict.injection_detected ? 1 : 0,
+        reasons: JSON.stringify(verdict.reasons ?? []),
+        amount_atomic: ctx.amountAtomic.toString(),
+        protected_atomic: verdict.protectedAmountAtomic ?? null,
+        target_host: ctx.targetHost,
+        resource: ctx.resource,
+        settlement_tx: null,
+      });
       // Block response carries the NAMED control + the protected atomic amount
       // (D-09/D-10), with Cache-Control: no-store (CLAUDE.md, never cache a block).
       reply
@@ -240,6 +277,28 @@ export async function forwardAndStream(
         stores.dedup.markFirstSeen(ctx.paymentId, ctx.resourceId);
         stores.ledger.recordSettlement(ctx.amountAtomic);
         stores.wallet.settle(ctx.amountAtomic);
+        // (OBS-01) Persist the allow to the append-only audit log INSIDE the settle
+        // gate, carrying the real settlement_tx — a stub-mode allow's `stub:<id>` ref
+        // is recorded as NULL (no on-chain tx). Exactly one row per decision; the audit
+        // write is wrapped so a write failure can NEVER undo or block a settled grant.
+        const settlementTxForAudit = settlementTx.startsWith("stub:") ? null : settlementTx;
+        try {
+          stores.audit.insert({
+            decided_at: Date.now(),
+            decision: "allow",
+            control: null,
+            matched_attack: verdict.matched_attack ?? null,
+            injection_detected: verdict.injection_detected ? 1 : 0,
+            reasons: JSON.stringify(verdict.reasons ?? []),
+            amount_atomic: ctx.amountAtomic.toString(),
+            protected_atomic: null,
+            target_host: ctx.targetHost,
+            resource: ctx.resource,
+            settlement_tx: settlementTxForAudit,
+          });
+        } catch (err) {
+          req.log.warn({ err: (err as Error).message }, "audit write failed (settled grant unaffected)");
+        }
       }
     } else {
       // Defensive: any path reaching here without a confirmed settle fails closed.
