@@ -195,7 +195,17 @@ export async function forwardAndStream(
     //   • STUB (default, OR real-but-keyless fallback D-01): preserve the EXACT Phase 1-3
     //     buildStubXPayment + manual replay below, gated on the upstream-200.
     // No adapter wired (unit/e2e that never boot the server) → legacy stub path.
-    const outcome = settlementAdapter ? await settlementAdapter(target) : null;
+    // CR-01 / D-02a: thread the DECIDED requirements so the REAL path binds the on-chain
+    // payment to the 402 decide() approved (a GatewayClient round-trip that re-fetches a
+    // DIFFERENT 402 — higher amount, redirected payTo, swapped asset/network — fails closed).
+    const outcome = settlementAdapter
+      ? await settlementAdapter(target, {
+          amountAtomic: ctx.amountAtomic,
+          payTo: requirements.payTo,
+          asset: requirements.asset,
+          network: requirements.network,
+        })
+      : null;
 
     // The settle gate inputs the commit-once block is keyed on (INTEG-04): a CONFIRMED
     // settle AND a transaction reference. Computed per path below.

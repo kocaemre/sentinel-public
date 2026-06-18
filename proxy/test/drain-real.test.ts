@@ -9,6 +9,7 @@ import {
   SETTLE_FAILCLOSED,
   type GatewayClientLike,
   type CapLedger,
+  type DecidedRequirements,
 } from "../src/settlement/gateway.js";
 import { openLedger } from "../src/policy/ledger.js";
 import { openDedup } from "../src/policy/dedup.js";
@@ -38,6 +39,15 @@ import { payDirectReal } from "../../reference-agent/src/agent.js";
 const CAPS = { perCallCapAtomic: 1_000_000n, hourlyBudgetAtomic: 5_000_000n };
 const REAL_CFG = { arcChain: "arcTestnet", walletPrivateKey: "0xkey", ...CAPS };
 const TARGET = new URL("http://127.0.0.1/paid-overpriced");
+
+/**
+ * CR-01: the decided requirements threaded into the gateway. These cases predate the
+ * decision-binding and only exercise the cap / settle-gate arms, so `decided` is set to
+ * the SAME amount the fake 402 pays (binding is a no-op here — the cap/settle behavior is
+ * unchanged). The amount is per-test so a higher-priced over-cap case still trips the CAP
+ * arm (its intended cause), not the binding arm.
+ */
+const decidedFor = (amountAtomic: bigint): DecidedRequirements => ({ amountAtomic });
 
 /** A scriptable fake GatewayClient (no network). */
 function fakeClient(opts: {
@@ -95,7 +105,8 @@ test("a cap-EXCEEDING payment is rejected by the in-process deterministic cap la
   };
   let out;
   try {
-    out = await g(TARGET);
+    // decided amount == paid amount → the CAP arm (not the binding arm) is the trip cause.
+    out = await g(TARGET, decidedFor(50_000_000n));
   } finally {
     console.warn = orig;
   }
@@ -123,7 +134,7 @@ test("settled:false (unconfirmed settle) commits NOTHING — no ledger, no walle
       makeClient: () => fakeClient({ amount: "500000", settleResponse: undefined }),
       ledger: { spentSince: () => 0n },
     });
-    const out = await g(TARGET);
+    const out = await g(TARGET, decidedFor(500_000n));
     assert.equal(out.settled, false, "unconfirmed settle → fail-closed");
 
     // Simulate forward.ts's gate: commit ONLY when settled && txHash. It must NOT fire.
@@ -156,7 +167,7 @@ test("settled:true + txHash commits exactly once; a replay of the settled paymen
         fakeClient({ amount: "500000", settleResponse: { success: true, transaction: "0xCONFIRMED" } }),
       ledger: { spentSince: () => 0n },
     });
-    const out = await g(TARGET);
+    const out = await g(TARGET, decidedFor(500_000n));
     assert.equal(out.settled, true);
     assert.equal(out.txHash, "0xCONFIRMED");
 

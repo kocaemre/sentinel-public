@@ -27,9 +27,14 @@ import {
   SETTLE_FAILCLOSED,
   type GatewayDeps,
   type SettlementResult,
+  type DecidedRequirements,
 } from "./gateway.js";
 
-export { SETTLE_FAILCLOSED, type SettlementResult } from "./gateway.js";
+export {
+  SETTLE_FAILCLOSED,
+  type SettlementResult,
+  type DecidedRequirements,
+} from "./gateway.js";
 
 /**
  * The settlement outcome handed back to forward.ts. The `mode` discriminates which
@@ -51,10 +56,14 @@ export type SettlementDeps = GatewayDeps;
 
 /**
  * The settlement adapter signature forward.ts injects. `target` is the upstream URL the
- * payment settles against. `_ctx` is reserved for future per-decision routing (the stub
- * path needs no ctx today — forward.ts already holds the parsed requirements).
+ * payment settles against; `decided` is the requirements `decide()` approved, threaded so
+ * the REAL path can BIND the on-chain payment to the decision (CR-01 / D-02a). The stub
+ * path ignores `decided` — it replays the exact Phase 1-3 path forward.ts already holds.
  */
-export type SettlementAdapter = (target: URL) => Promise<SettlementOutcome>;
+export type SettlementAdapter = (
+  target: URL,
+  decided: DecidedRequirements,
+) => Promise<SettlementOutcome>;
 
 /** A stub settle never carries a real tx; the txHash is minted by buildStubXPayment in forward.ts. */
 const STUB_OUTCOME: SettlementOutcome = { mode: "stub", settled: true };
@@ -77,11 +86,13 @@ export function makeSettlementAdapter(
   // records the demo via the Phase 1-3 path; never fabricate a real tx).
   const useStub = config.settlementMode === "stub" || !config.walletPrivateKey;
 
-  return async (target: URL): Promise<SettlementOutcome> => {
+  return async (target: URL, decided: DecidedRequirements): Promise<SettlementOutcome> => {
+    // Stub ignores `decided` and preserves its exact externally-observable behavior (D-01):
+    // forward.ts runs the Phase 1-3 buildStubXPayment + manual replay it already holds.
     if (useStub) return STUB_OUTCOME;
 
     if (!gateway) gateway = makeGatewayAdapter(config, deps);
-    const result = await gateway(target);
+    const result = await gateway(target, decided);
     return { mode: "real", settled: result.settled, txHash: result.txHash };
   };
 }

@@ -36,7 +36,15 @@ import { reqAmountAtomic } from "../policy/amount.js";
  * may return an abort; the response hook reads the OPTIONAL `ctx.settleResponse`.
  */
 interface BeforePaymentCtx {
-  selectedRequirements: { amount: string };
+  // PROBED against node_modules/@circle-fin/x402-batching/dist/hooks-*.d.ts:
+  //   HookPaymentRequirements = { scheme, network, asset, amount, payTo, maxTimeoutSeconds }
+  // We bind on every field the decision can be tied to: amount (≤ decided) + payTo +
+  // asset + network (exact). `resource` is NOT on selectedRequirements (it lives on
+  // paymentRequired.resource.url), so it cannot be bound here — see the SUMMARY's
+  // residual-limitation note. payTo/asset/network are OPTIONAL on this structural type
+  // so older fakes and the cap-only tests stay valid; a missing decided value skips
+  // that field's check (amount is always bound).
+  selectedRequirements: { amount: string; payTo?: string; asset?: string; network?: string };
 }
 type BeforePaymentHook = (ctx: BeforePaymentCtx) => Promise<void | { abort: true; reason: string }>;
 interface PaymentResponseCtx {
@@ -54,6 +62,22 @@ const HOUR_MS = 3_600_000;
 export interface SettlementResult {
   settled: boolean;
   txHash?: string;
+}
+
+/**
+ * The requirements `decide()` approved — threaded from forward.ts so the cap hook can
+ * BIND the on-chain payment to the decision (CR-01 / D-02a). The GatewayClient runs its
+ * OWN 402→sign→settle round-trip and may re-fetch a DIFFERENT 402; this is the invariant
+ * the paid 402 must satisfy. `amountAtomic` is the parsed `ctx.amountAtomic` (a bigint);
+ * `payTo`/`asset`/`network` are the decided 402's stable identity fields. Each string
+ * field is OPTIONAL: when present it is asserted exactly; when absent (the decided 402
+ * carried no value) that field's binding is skipped. The amount bound is ALWAYS enforced.
+ */
+export interface DecidedRequirements {
+  amountAtomic: bigint;
+  payTo?: string;
+  asset?: string;
+  network?: string;
 }
 
 /**
@@ -102,7 +126,7 @@ export interface GatewayDeps {
 export function makeGatewayAdapter(
   config: Pick<Config, "arcChain" | "walletPrivateKey" | "perCallCapAtomic" | "hourlyBudgetAtomic">,
   deps: GatewayDeps = {},
-): (target: URL) => Promise<SettlementResult> {
+): (target: URL, decided: DecidedRequirements) => Promise<SettlementResult> {
   // Construct ONE client lazily on first use. We never build it without a key — the
   // empty-key path short-circuits to the stub in the adapter BEFORE this runs, but we
   // re-assert here so a direct caller never constructs against an empty key either.
@@ -111,6 +135,11 @@ export function makeGatewayAdapter(
   // The transaction reference captured by onPaymentResponse — the PRIMARY settle signal
   // (NEVER pay() resolution, RESEARCH Pitfall 2). Reset per call below.
   let settleTx: string | undefined;
+
+  // The decision the hook must bind the payment to (CR-01). The hook is registered ONCE
+  // in ensureClient() but `decided` arrives per-call; we stash it here (reset each call,
+  // like settleTx) so the single registered hook reads the current call's decision.
+  let decided: DecidedRequirements | null = null;
 
   function ensureClient(): GatewayClientLike {
     if (client) return client;
@@ -140,6 +169,27 @@ export function makeGatewayAdapter(
       if (amt > config.perCallCapAtomic || spent + amt > config.hourlyBudgetAtomic) {
         return { abort: true, reason: "exceeds Sentinel cap (in-process backstop)" };
       }
+
+      // CR-01 / D-02a — CHECK-TO-USE binding. decide() approved the FIRST 402 forward.ts
+      // fetched; pay() re-fetched its OWN 402 and could be serving a DIFFERENT one (higher-
+      // but-under-cap price, redirected payTo, swapped asset/network). Bind the payment to
+      // the decision: the paid amount must be ≤ what was decided (a cheaper 402 is fine),
+      // and every decided identity field the SDK ctx exposes must match EXACTLY. Without
+      // a decided context (no binding requested) we fall back to the cap-only check above.
+      if (decided) {
+        const sel = ctx.selectedRequirements;
+        const mismatch =
+          amt > decided.amountAtomic ||
+          (decided.payTo !== undefined && sel.payTo !== undefined && sel.payTo !== decided.payTo) ||
+          (decided.asset !== undefined && sel.asset !== undefined && sel.asset !== decided.asset) ||
+          (decided.network !== undefined && sel.network !== undefined && sel.network !== decided.network);
+        if (mismatch) {
+          return {
+            abort: true,
+            reason: "paid requirements differ from the decided payment (in-process backstop)",
+          };
+        }
+      }
     });
 
     // Settle signal (INTEG-04): capture the confirmed transaction ref. settleResponse
@@ -153,12 +203,13 @@ export function makeGatewayAdapter(
     return client;
   }
 
-  return async (target: URL): Promise<SettlementResult> => {
+  return async (target: URL, decidedArg: DecidedRequirements): Promise<SettlementResult> => {
     // Re-assert the key guard (the adapter already routed empty-key real mode to stub,
     // but a direct caller must never sign against an empty key).
     if (!config.walletPrivateKey) return SETTLE_FAILCLOSED;
 
     settleTx = undefined; // reset the per-call settle signal
+    decided = decidedArg; // bind THIS call's payment to THIS call's decision (CR-01)
     try {
       const c = ensureClient();
       // pay() runs its OWN 402 → sign → settle round-trip and fires the hooks. An

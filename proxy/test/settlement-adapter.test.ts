@@ -30,6 +30,12 @@ const REAL_CFG = {
 };
 const TARGET = new URL("http://upstream.test/paid");
 
+// CR-01: a permissive decided binding for the pre-binding cases in THIS file. Only the
+// amount can be bound here (the legacy fake's selectedRequirements carries no payTo/asset/
+// network), and the amount ceiling is set high enough that binding NEVER introduces a new
+// abort — these tests exercise the cap / settle-gate / guard arms, not the binding arm.
+const DECIDED = { amountAtomic: 1_000_000_000_000n };
+
 /** A scriptable fake GatewayClient: records the hooks, plays back a settle response. */
 function fakeClient(opts: {
   settleResponse?: { success: boolean; transaction: string };
@@ -89,7 +95,7 @@ test("stub mode → stub outcome; never constructs a GatewayClient", async () =>
       },
     },
   );
-  const out = await adapter(TARGET);
+  const out = await adapter(TARGET, DECIDED);
   assert.equal(out.mode, "stub");
   assert.equal(out.settled, true, "a stub allow signals settled so the demo commit fires");
   assert.equal(out.txHash, undefined, "stub carries no real tx");
@@ -107,7 +113,7 @@ test("real mode with EMPTY key → falls back to stub, never throws, never fabri
       },
     },
   );
-  const out = await adapter(TARGET);
+  const out = await adapter(TARGET, DECIDED);
   assert.equal(out.mode, "stub", "empty real-mode key falls back to the stub path (D-01)");
   assert.equal(out.txHash, undefined);
   assert.equal(constructed, false, "no client built without a key");
@@ -117,7 +123,7 @@ test("real mode with a confirmed settle → settled:true with the onPaymentRespo
   const adapter = makeSettlementAdapter(REAL_CFG, {
     makeClient: () => fakeClient({ settleResponse: { success: true, transaction: "0xTXHASH" } }).client,
   });
-  const out = await adapter(TARGET);
+  const out = await adapter(TARGET, DECIDED);
   assert.equal(out.mode, "real");
   assert.equal(out.settled, true);
   assert.equal(out.txHash, "0xTXHASH");
@@ -129,7 +135,7 @@ test("real mode where pay() throws → SETTLE_FAILCLOSED (settled:false, no tx)"
   const g = makeGatewayAdapter(REAL_CFG, {
     makeClient: () => fakeClient({ throwOnPay: new Error("network down") }).client,
   });
-  const out = await g(TARGET);
+  const out = await g(TARGET, DECIDED);
   assert.deepEqual(out, SETTLE_FAILCLOSED);
   assert.equal(out.settled, false);
   assert.equal(out.txHash, undefined);
@@ -140,7 +146,7 @@ test("real mode where onPaymentResponse carries NO transaction → SETTLE_FAILCL
   const g = makeGatewayAdapter(REAL_CFG, {
     makeClient: () => fakeClient({ settleResponse: undefined, payResult: { transaction: "0xLEAK" } }).client,
   });
-  const out = await g(TARGET);
+  const out = await g(TARGET, DECIDED);
   assert.equal(out.settled, false, "pay() resolving is NOT a settle (RESEARCH Pitfall 2)");
   assert.equal(out.txHash, undefined, "never adopt PayResult.transaction without the hook signal");
 });
@@ -149,7 +155,7 @@ test("a settle hook with success:false (no transaction adoption) → fail-closed
   const g = makeGatewayAdapter(REAL_CFG, {
     makeClient: () => fakeClient({ settleResponse: { success: false, transaction: "0xNOPE" } }).client,
   });
-  const out = await g(TARGET);
+  const out = await g(TARGET, DECIDED);
   assert.equal(out.settled, false);
 });
 
@@ -159,7 +165,7 @@ test("onBeforePaymentCreation aborts an over-cap payment; reason names the in-pr
   // amount 2_000_000 > perCallCapAtomic 1_000_000 → abort.
   const fc = fakeClient({ amount: "2000000" });
   const g = makeGatewayAdapter(REAL_CFG, { makeClient: () => fc.client });
-  const out = await g(TARGET);
+  const out = await g(TARGET, DECIDED);
   assert.equal(out.settled, false, "an aborted cap → fail-closed, no grant");
   assert.equal(fc.sawAbort(), true, "the cap hook aborted before signing");
 });
@@ -172,7 +178,7 @@ test("cap hook uses the rolling-hour ledger budget (BigInt, never float)", async
   const fc = fakeClient({ amount: "2000000", settleResponse: { success: true, transaction: "0xOK" } });
   const g = makeGatewayAdapter(cfg, { makeClient: () => fc.client, ledger });
   // spent 4_000_000 + amount 2_000_000 = 6_000_000 > 5_000_000 budget → abort.
-  const out = await g(TARGET);
+  const out = await g(TARGET, DECIDED);
   assert.equal(out.settled, false, "rolling-budget arm of the cap hook trips → fail-closed");
   assert.equal(fc.sawAbort(), true);
 });
@@ -184,7 +190,7 @@ test("under both caps with a ledger → settles cleanly", async () => {
     makeClient: () => fakeClient({ settleResponse: { success: true, transaction: "0xUNDER" } }).client,
     ledger,
   });
-  const out = await g(TARGET);
+  const out = await g(TARGET, DECIDED);
   assert.equal(out.settled, true);
   assert.equal(out.txHash, "0xUNDER");
 });
@@ -201,7 +207,7 @@ for (const bad of ["-50000000", "0x10", " 5 ", "1e3", "", "NaN", "5.0"]) {
     const cfg = { ...REAL_CFG, perCallCapAtomic: 1_000_000_000n, hourlyBudgetAtomic: 1_000_000_000n };
     const fc = fakeClient({ amount: bad });
     const g = makeGatewayAdapter(cfg, { makeClient: () => fc.client });
-    const out = await g(TARGET);
+    const out = await g(TARGET, DECIDED);
     assert.equal(out.settled, false, "a malformed amount must fail closed (no grant)");
     assert.equal(out.txHash, undefined, "no tx on the malformed-amount path");
     assert.equal(fc.sawAbort(), true, "the guard aborted the hook before signing");
@@ -211,7 +217,7 @@ for (const bad of ["-50000000", "0x10", " 5 ", "1e3", "", "NaN", "5.0"]) {
 test("CR-02: a well-formed under-cap amount still settles (no regression to the guard)", async () => {
   const fc = fakeClient({ amount: "500000", settleResponse: { success: true, transaction: "0xGOOD" } });
   const g = makeGatewayAdapter(REAL_CFG, { makeClient: () => fc.client });
-  const out = await g(TARGET);
+  const out = await g(TARGET, DECIDED);
   assert.equal(out.settled, true);
   assert.equal(out.txHash, "0xGOOD");
   assert.equal(fc.sawAbort(), false, "a well-formed amount must not be aborted by the guard");
@@ -229,7 +235,7 @@ test("the wallet private key NEVER appears in a logged string on the fail-closed
     const g = makeGatewayAdapter(REAL_CFG, {
       makeClient: () => fakeClient({ throwOnPay: new Error("boom") }).client,
     });
-    await g(TARGET);
+    await g(TARGET, DECIDED);
   } finally {
     console.warn = orig;
   }
