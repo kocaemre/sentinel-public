@@ -38,13 +38,18 @@ let proxyPort: number;
 
 /**
  * The offline stub judge — emulates the hardened judge WITHOUT a network call.
- * Keys its branch on the screened context/resource: the operator-impersonation
- * injection ("pre-approved"/"ignore") in the description is the catch.
+ * Screens the DESCRIPTION channel ONLY (ctx.context, the D-02 attacker channel
+ * forward.ts populates from requirements.description) — NOT the resource name. The
+ * operator-impersonation injection ("pre-approved"/"ignore prior limits") that lives
+ * in the 402 description is the catch, matching the production injection-in-description
+ * path. A missing/empty ctx.context is treated as "no injection text seen", so the
+ * branch does NOT fire — making this a CR-01 regression guard: if forward.ts ever
+ * stops populating ctx.context, the stub returns the PRE allow and the injected-402
+ * `decision: "block"` assertion FAILS (the suite goes red instead of silently green).
  */
 const stubJudge = async (ctx: DecisionContext, pre: Verdict): Promise<Verdict> => {
-  const screened = `${ctx.context ?? ""} ${ctx.resource}`.toLowerCase();
+  const screened = (ctx.context ?? "").toLowerCase();
   const looksInjected =
-    screened.includes("/paid-injected") ||
     screened.includes("pre-approved") ||
     screened.includes("ignore prior limits");
   if (looksInjected) {
