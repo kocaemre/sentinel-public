@@ -1,9 +1,10 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { loadConfig, type Config } from "./config.js";
 import { decodeTarget, assertAllowed } from "./target.js";
-import { forwardAndStream } from "./forward.js";
-import { configureDecision } from "./decision/stub.js";
+import { forwardAndStream, configureSettlement } from "./forward.js";
+import { configureDecision, getCommitStores } from "./decision/stub.js";
 import { makeOpenRouterJudge } from "./judge/adapter.js";
+import { makeSettlementAdapter } from "./settlement/adapter.js";
 
 /**
  * Build the Sentinel proxy as a Fastify instance.
@@ -27,6 +28,13 @@ export function buildServer(config: Config): FastifyInstance {
   // judge still fails closed to `block` on any error once a key IS present.)
   const judge = config.openRouterApiKey ? makeOpenRouterJudge(config) : undefined;
   configureDecision({ ...config, judge });
+
+  // Wire the settlement adapter (Plan 04-01). Stub-default (D-01): the demo always
+  // runs. In real mode the GatewayClient settles USDC on Arc testnet and the in-process
+  // cap backstop reads the SAME ledger the decision seam opened (configureDecision ran
+  // first, so getCommitStores() exposes it). Stub mode never constructs a GatewayClient.
+  const ledger = getCommitStores()?.ledger;
+  configureSettlement(makeSettlementAdapter(config, { ledger }));
 
   const app = Fastify({ logger: { level: config.logLevel } });
 

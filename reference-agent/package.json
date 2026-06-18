@@ -8,8 +8,10 @@
     "start": "tsx src/agent.ts"
   },
   "dependencies": {
+    "@circle-fin/x402-batching": "^3.2.0",
     "@sentinel/shared": "workspace:*",
     "better-sqlite3": "^12.11.1",
+    "viem": "^2.52.2",
     "x402": "^1.2.0"
   },
   "devDependencies": {

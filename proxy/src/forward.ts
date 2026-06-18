@@ -9,6 +9,20 @@ import { decide, getCommitStores } from "./decision/stub.js";
 import { canonicalPaymentId } from "./policy/identity.js";
 import { reqAmountAtomic } from "./policy/amount.js";
 import type { DecisionContext } from "@sentinel/shared";
+import type { SettlementAdapter } from "./settlement/adapter.js";
+
+/**
+ * The injected settlement adapter (real↔stub). The server wires it once at boot via
+ * `configureSettlement`; the `allow` branch below routes through it (D-01). Until wired
+ * (the unit/e2e paths that never boot the server), it is null and the allow branch uses
+ * the EXACT Phase 1-3 stub path inline — preserving every legacy behavior.
+ */
+let settlementAdapter: SettlementAdapter | null = null;
+
+/** Wire the settlement adapter into the hot path (mirrors `configureDecision`). */
+export function configureSettlement(adapter: SettlementAdapter | null): void {
+  settlementAdapter = adapter;
+}
 
 /**
  * Max bytes Sentinel will buffer from a held 402 body before failing closed.
@@ -137,76 +151,129 @@ export async function forwardAndStream(
       return;
     }
 
-    // (4) Build the fake-signed X-PAYMENT — fail-closed on throw (D-09).
-    let xPayment: string;
-    try {
-      xPayment = buildStubXPayment(requirements);
-    } catch (err) {
-      req.log.warn({ err: (err as Error).message }, "cannot build X-PAYMENT — fail-closed");
-      return failClosed(reply, "cannot build X-PAYMENT");
+    // (4) SETTLE the allowed payment via the injected adapter (Plan 04-01). Two paths:
+    //   • REAL: the GatewayClient does its OWN 402→sign→settle round-trip — no manual
+    //     X-PAYMENT replay here. The `settled`/`txHash` it returns ARE the confirmed
+    //     on-chain signal (INTEG-04). The in-process cap backstop fires inside it (D-02).
+    //   • STUB (default, OR real-but-keyless fallback D-01): preserve the EXACT Phase 1-3
+    //     buildStubXPayment + manual replay below, gated on the upstream-200.
+    // No adapter wired (unit/e2e that never boot the server) → legacy stub path.
+    const outcome = settlementAdapter ? await settlementAdapter(target) : null;
+
+    // The settle gate inputs the commit-once block is keyed on (INTEG-04): a CONFIRMED
+    // settle AND a transaction reference. Computed per path below.
+    let settled = false;
+    let settlementTx: string | undefined;
+    // For the stub/legacy path we still stream the upstream 200 body back; the real path
+    // returns the GatewayClient's already-fetched data, so there is no undici retry body.
+    let retry: Dispatcher.ResponseData | null = null;
+
+    if (outcome && outcome.mode === "real") {
+      // REAL: gate strictly on the adapter's confirmed settle signal. An unconfirmed
+      // settle (settled:false / no tx) fails closed with NO grant (INTEG-04 / D-01a) —
+      // never a fabricated 200, never a manual stub replay on the real path.
+      settled = outcome.settled;
+      settlementTx = outcome.txHash;
+      if (!settled || !settlementTx) {
+        req.log.warn({ host: target.host }, "real settlement not confirmed — fail-closed");
+        return failClosed(reply, "settlement not confirmed");
+      }
+    } else {
+      // STUB / legacy: the exact Phase 1-3 path. If the adapter ran in stub mode it has
+      // already signalled `settled:true`; if no adapter is wired we behave exactly as
+      // before. Either way the upstream-200 of the manual replay is the stub settle.
+
+      // (4a) Build the fake-signed X-PAYMENT — fail-closed on throw (D-09).
+      let xPayment: string;
+      try {
+        xPayment = buildStubXPayment(requirements);
+      } catch (err) {
+        req.log.warn({ err: (err as Error).message }, "cannot build X-PAYMENT — fail-closed");
+        return failClosed(reply, "cannot build X-PAYMENT");
+      }
+
+      // (5) Replay the request to upstream WITH the X-PAYMENT header. A transport
+      // failure on the replay must fail closed too — never fabricate a paid 200
+      // and never leak an uncontrolled error (T-01-07 / CR-02).
+      try {
+        retry = await request(target.href, {
+          method,
+          headers: {
+            ...(forwardableHeaders(req.headers) as Record<string, string | string[]>),
+            "X-PAYMENT": xPayment,
+          },
+          body: reqBody,
+        });
+      } catch (err) {
+        req.log.warn({ err: (err as Error).message, host: target.host }, "X-PAYMENT replay unreachable — fail-closed");
+        return failClosed(reply, "upstream unreachable on payment replay");
+      }
+
+      // (6) Any retry error fails closed — never fabricate a 200 (D-09).
+      if (retry.statusCode >= 400) {
+        await retry.body.dump(); // consume the single-use body
+        req.log.warn({ status: retry.statusCode }, "upstream retry failed — fail-closed");
+        return failClosed(reply, `upstream retry ${retry.statusCode}`);
+      }
+
+      // The upstream 200 is the stub settle. Mint a stub tx ref from the X-PAYMENT so
+      // the commit gate `settled && txHash` is UNIFORM across stub and real (the stub
+      // ref is clearly non-on-chain; the audit/dashboard treat it as the stub marker).
+      settled = true;
+      settlementTx = `stub:${ctx.paymentId}`;
     }
 
-    // (5) Replay the request to upstream WITH the X-PAYMENT header. A transport
-    // failure on the replay must fail closed too — never fabricate a paid 200
-    // and never leak an uncontrolled error (T-01-07 / CR-02).
-    let retry: Dispatcher.ResponseData;
-    try {
-      retry = await request(target.href, {
-        method,
-        headers: {
-          ...(forwardableHeaders(req.headers) as Record<string, string | string[]>),
-          "X-PAYMENT": xPayment,
-        },
-        body: reqBody,
-      });
-    } catch (err) {
-      req.log.warn({ err: (err as Error).message, host: target.host }, "X-PAYMENT replay unreachable — fail-closed");
-      return failClosed(reply, "upstream unreachable on payment replay");
-    }
-
-    // (6) Any retry error fails closed — never fabricate a 200 (D-09).
-    if (retry.statusCode >= 400) {
-      await retry.body.dump(); // consume the single-use body
-      req.log.warn({ status: retry.statusCode }, "upstream retry failed — fail-closed");
-      return failClosed(reply, `upstream retry ${retry.statusCode}`);
-    }
-
-    // ── POST-SETTLEMENT COMMIT (RESEARCH Pitfall 2, CR-02) ───────────────────
-    // The upstream 200 means the payment SETTLED. Commit ONCE here — never on the
-    // block branch above, never on the fail-closed retry branch (those returned
-    // early). All three commits reflect only CONFIRMED settlements:
+    // ── POST-SETTLEMENT COMMIT (RESEARCH Pitfall 2, CR-02, INTEG-04) ─────────
+    // Gate the commit-once block on the CONFIRMED settle signal — never on pay()
+    // resolution alone (real) and never on the block/fail-closed branches (those
+    // returned early). All three commits reflect only CONFIRMED settlements:
     //   • dedup.markFirstSeen — the replay request-identity mark. Bound to SETTLEMENT
     //     (here), NOT to the allow decision (CR-02): a payment allowed-but-failed
     //     before settlement must NOT block the agent's legitimate retry. The read-only
     //     `wasSeen` check in runControls still blocks a duplicate of a SETTLED payment
     //     (SC#4). markFirstSeen's INSERT ... ON CONFLICT is the atomic claim.
     //   • ledger.recordSettlement — feeds the rolling-window budget/velocity ledger.
-    //   • wallet.settle — debits the simulated balance.
-    const stores = getCommitStores();
-    if (stores) {
-      stores.dedup.markFirstSeen(ctx.paymentId, ctx.resourceId);
-      stores.ledger.recordSettlement(ctx.amountAtomic);
-      stores.wallet.settle(ctx.amountAtomic);
-    }
-
-    // Audit seed: if the upstream returned a settle header, decode + log it and
-    // pass it through unchanged (RESEARCH Open Question 2; no behavior depends on it).
-    const settleHeader = retry.headers["x-payment-response"];
-    if (typeof settleHeader === "string") {
-      try {
-        req.log.info({ settle: decodeXPaymentResponse(settleHeader) }, "x402 settle response");
-      } catch {
-        // Non-fatal: a malformed/foreign settle header is logged-and-ignored, passed through verbatim.
+    //   • wallet.settle — debits the simulated balance (the displayed wallet number).
+    if (settled && settlementTx) {
+      const stores = getCommitStores();
+      if (stores) {
+        stores.dedup.markFirstSeen(ctx.paymentId, ctx.resourceId);
+        stores.ledger.recordSettlement(ctx.amountAtomic);
+        stores.wallet.settle(ctx.amountAtomic);
       }
+    } else {
+      // Defensive: any path reaching here without a confirmed settle fails closed.
+      return failClosed(reply, "settlement not confirmed");
     }
 
-    // (7) Return the final 200 to the agent with Cache-Control: no-store (Pitfall 5).
-    reply.hijack();
-    reply.raw.writeHead(retry.statusCode, {
-      ...(stripHopByHop(retry.headers) as Record<string, string | string[]>),
-      "Cache-Control": "no-store",
-    });
-    await pipeline(retry.body, reply.raw);
+    // ── RETURN to the agent ───────────────────────────────────────────────────
+    if (retry) {
+      // STUB / legacy: stream the upstream 200 body back with Cache-Control: no-store.
+      const settleHeader = retry.headers["x-payment-response"];
+      if (typeof settleHeader === "string") {
+        try {
+          req.log.info({ settle: decodeXPaymentResponse(settleHeader) }, "x402 settle response");
+        } catch {
+          // Non-fatal: a malformed/foreign settle header is logged-and-ignored.
+        }
+      }
+      reply.hijack();
+      reply.raw.writeHead(retry.statusCode, {
+        ...(stripHopByHop(retry.headers) as Record<string, string | string[]>),
+        "Cache-Control": "no-store",
+      });
+      await pipeline(retry.body, reply.raw);
+      return;
+    }
+
+    // REAL: the GatewayClient already fetched the resource. Return a controlled 200
+    // with the confirmed tx ref, Cache-Control: no-store (CLAUDE.md, never cache a paid
+    // response). The full resource body flows in Plan 02's audit; the agent gets the
+    // settle confirmation here.
+    reply
+      .code(200)
+      .header("Cache-Control", "no-store")
+      .send({ settled: true, transaction: settlementTx });
     return;
   }
 
