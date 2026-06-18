@@ -27,6 +27,7 @@ import {
 } from "@circle-fin/x402-batching/client";
 import type { Hex } from "viem";
 import type { Config } from "../config.js";
+import { reqAmountAtomic } from "../policy/amount.js";
 
 /**
  * Structural hook-context shapes (the SDK's hook TYPES are not re-exported from the
@@ -124,7 +125,17 @@ export function makeGatewayAdapter(
     // before signing when the requirement exceeds the per-call cap OR the rolling-hour
     // budget. BigInt compare only — never float (CLAUDE.md money-as-atomic invariant).
     client.onBeforePaymentCreation(async (ctx) => {
-      const amt = BigInt(ctx.selectedRequirements.amount);
+      // CR-02: the paid `amount` is an attacker-controlled string from the 402 the
+      // GatewayClient re-fetched. A bare BigInt() would honor "-50000000" (negative —
+      // defeats every cap and CREDITS the wallet), "0x10" (hex), " 5 " (whitespace),
+      // and throw uncontrolled on "1e3"/"" (escaping the hook). Parse through the same
+      // /^\d+$/ guard everything else uses, and FAIL CLOSED on any invalid value.
+      let amt: bigint;
+      try {
+        amt = reqAmountAtomic(ctx.selectedRequirements.amount);
+      } catch {
+        return { abort: true, reason: "invalid payment amount (in-process backstop)" };
+      }
       const spent = deps.ledger ? deps.ledger.spentSince(HOUR_MS) : 0n;
       if (amt > config.perCallCapAtomic || spent + amt > config.hourlyBudgetAtomic) {
         return { abort: true, reason: "exceeds Sentinel cap (in-process backstop)" };

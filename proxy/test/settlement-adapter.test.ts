@@ -189,6 +189,34 @@ test("under both caps with a ledger → settles cleanly", async () => {
   assert.equal(out.txHash, "0xUNDER");
 });
 
+// ── CR-02: guarded amount parse at the money boundary ─────────────────────────
+// The cap hook must parse ctx.selectedRequirements.amount through reqAmountAtomic
+// (the /^\d+$/ fail-closed guard), NEVER a bare BigInt(). A malformed/negative/hex/
+// whitespace amount must ABORT (fail-closed) — never be honored, never throw
+// uncontrolled out of the hook (which would let pay() proceed or crash the request).
+
+for (const bad of ["-50000000", "0x10", " 5 ", "1e3", "", "NaN", "5.0"]) {
+  test(`CR-02: a malformed amount ${JSON.stringify(bad)} aborts fail-closed (never honored, never throws out of the hook)`, async () => {
+    // Use generous caps so ONLY the guard (not the cap arm) can trip the abort.
+    const cfg = { ...REAL_CFG, perCallCapAtomic: 1_000_000_000n, hourlyBudgetAtomic: 1_000_000_000n };
+    const fc = fakeClient({ amount: bad });
+    const g = makeGatewayAdapter(cfg, { makeClient: () => fc.client });
+    const out = await g(TARGET);
+    assert.equal(out.settled, false, "a malformed amount must fail closed (no grant)");
+    assert.equal(out.txHash, undefined, "no tx on the malformed-amount path");
+    assert.equal(fc.sawAbort(), true, "the guard aborted the hook before signing");
+  });
+}
+
+test("CR-02: a well-formed under-cap amount still settles (no regression to the guard)", async () => {
+  const fc = fakeClient({ amount: "500000", settleResponse: { success: true, transaction: "0xGOOD" } });
+  const g = makeGatewayAdapter(REAL_CFG, { makeClient: () => fc.client });
+  const out = await g(TARGET);
+  assert.equal(out.settled, true);
+  assert.equal(out.txHash, "0xGOOD");
+  assert.equal(fc.sawAbort(), false, "a well-formed amount must not be aborted by the guard");
+});
+
 // ── secret hygiene (T-04-01) ─────────────────────────────────────────────────
 
 test("the wallet private key NEVER appears in a logged string on the fail-closed path", async () => {
