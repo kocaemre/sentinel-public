@@ -102,6 +102,10 @@ export async function forwardAndStream(
         paymentId: canonicalPaymentId(requirements),
         resourceId: requirements.resource,
         resource: requirements.resource,
+        // D-02: route the attacker-influenced 402 description through the judge's
+        // screened-context channel in PRODUCTION (not just the prompt.ts fallback),
+        // so the injection-in-description catch path is live and regression-guarded.
+        context: requirements.description,
       };
     } catch (err) {
       req.log.warn({ err: (err as Error).message }, "unparseable 402 — fail-closed");
