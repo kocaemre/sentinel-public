@@ -2,6 +2,7 @@ packages:
   - 'proxy'
   - 'attack-server'
   - 'reference-agent'
+  - 'dashboard'
   - 'packages/*'
 
 # better-sqlite3 ships Node 22 prebuilt binaries via prebuild-install (RESEARCH A1,
