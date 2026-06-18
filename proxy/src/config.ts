@@ -74,6 +74,31 @@ export const ConfigSchema = z.object({
    * `block` (D-05). A snappy ceiling — the judge sits on every payment's hot path.
    */
   judgeTimeoutMs: z.number().int().positive(),
+
+  // ── Circle/Arc settlement (Plan 04-01) ──────────────────────────────────────
+  /**
+   * Settlement path selector (D-01, INTEG-01/02). CONFIG-SWAPPABLE, exactly
+   * mirroring the judge's `judgeModel` swap:
+   *   - "stub" (default): the Phase 1-3 fake-signed `buildStubXPayment` path — the
+   *     demo always runs even if testnet/faucet/SDK flakes.
+   *   - "real": settle real USDC on Arc testnet via Circle's Gateway. Falls back to
+   *     the stub at call time when `walletPrivateKey` is empty (the fail-closed
+   *     fallback, never a fabricated tx).
+   */
+  settlementMode: z.enum(["stub", "real"]),
+  /**
+   * Arc-testnet EOA private key (service SECRET — env ONLY, never logged). Allowed
+   * EMPTY at config-load exactly like `openRouterApiKey`: real mode with an empty
+   * key falls back to the stub path at call time, so a misconfigured real mode NEVER
+   * silently fabricates a paid 200 (T-04-01/T-04-05). NEVER appears in a log line.
+   */
+  walletPrivateKey: z.string(),
+  /**
+   * Circle Gateway `SupportedChainName` for the GatewayClient. Default the
+   * Task-1-confirmed Arc-TESTNET string `"arcTestnet"` (GATEWAY_DOMAINS.arcTestnet=26,
+   * chainId 5042002). NEVER `"arc"` — that is Arc MAINNET (A3 confirmed).
+   */
+  arcChain: z.string().min(1),
 });
 
 export type Config = z.infer<typeof ConfigSchema> & {
@@ -100,6 +125,12 @@ const DEFAULT_DB_PATH = "sentinel-wallet.db"; // shared with Plan 01's wallet (g
 const DEFAULT_JUDGE_MODEL = "google/gemini-2.5-flash";
 const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_JUDGE_TIMEOUT_MS = 4000; // snappy hot-path ceiling; tune per model latency
+// Settlement defaults (Plan 04-01). Stub-default so the demo always runs (D-01); the
+// orchestrator flips SENTINEL_SETTLEMENT_MODE=real manually for the live testnet demo.
+const DEFAULT_SETTLEMENT_MODE = "stub";
+// Task-1-confirmed Arc-TESTNET chain string (A3): GATEWAY_DOMAINS.arcTestnet=26,
+// chainId 5042002. NEVER "arc" (that is mainnet, domain 26 alias on a different chain id).
+const DEFAULT_ARC_CHAIN = "arcTestnet";
 // Legit /paid resource sells for 0.001 USDC (1000 atomic) — the overpayment baseline.
 const DEFAULT_PRICE_MAP: Record<string, string> = {
   "https://upstream/paid": "1000",
@@ -126,6 +157,9 @@ const DEFAULT_PRICE_MAP: Record<string, string> = {
  *  - SENTINEL_OPENROUTER_BASE_URL: OpenRouter base URL (default https://openrouter.ai/api/v1)
  *  - OPENROUTER_API_KEY     : OpenRouter API key (SECRET, never logged; default "" → adapter fails closed)
  *  - SENTINEL_JUDGE_TIMEOUT_MS: judge call timeout in ms (default 4000)
+ *  - SENTINEL_SETTLEMENT_MODE  : "stub" (default) | "real" — real settles USDC on Arc testnet
+ *  - SENTINEL_WALLET_PRIVATE_KEY: Arc-testnet EOA key (SECRET, never logged; default "" → real falls back to stub)
+ *  - SENTINEL_ARC_CHAIN        : Circle Gateway chain name (default "arcTestnet" — NEVER "arc"/mainnet)
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const rawAllow = (env.SENTINEL_ALLOWLIST ?? `localhost:${DEFAULT_MOCK_PORT}`)
@@ -168,6 +202,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     judgeTimeoutMs: env.SENTINEL_JUDGE_TIMEOUT_MS
       ? Number(env.SENTINEL_JUDGE_TIMEOUT_MS)
       : DEFAULT_JUDGE_TIMEOUT_MS,
+    // Circle/Arc settlement (Plan 04-01). The private key is read straight from env
+    // and NEVER logged (same posture as openRouterApiKey, T-04-01).
+    settlementMode: (env.SENTINEL_SETTLEMENT_MODE ??
+      DEFAULT_SETTLEMENT_MODE) as z.infer<typeof ConfigSchema>["settlementMode"],
+    walletPrivateKey: env.SENTINEL_WALLET_PRIVATE_KEY ?? "",
+    arcChain: env.SENTINEL_ARC_CHAIN ?? DEFAULT_ARC_CHAIN,
   };
 
   const parsed = ConfigSchema.parse(candidate); // throws ZodError on malformed config → fail-closed
