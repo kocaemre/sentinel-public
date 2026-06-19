@@ -42,6 +42,8 @@ const allowRow = (over: Partial<AuditRow> = {}): AuditRow => ({
   target_host: "api.example.com",
   resource: "/paid",
   settlement_tx: "0xabc123",
+  source: null,
+  agent_label: null,
   ...over,
 });
 
@@ -57,6 +59,8 @@ const blockRow = (over: Partial<AuditRow> = {}): AuditRow => ({
   target_host: "evil.example.com",
   resource: "/paid-overpriced",
   settlement_tx: null,
+  source: null,
+  agent_label: null,
   ...over,
 });
 
@@ -132,6 +136,12 @@ test("audit: protected SUM stays exact for many tiny atomic blocks (no float dri
 test("audit: source module contains NO UPDATE/DELETE statement (append-only by code shape, D-03)", () => {
   const auditSrc = fileURLToPath(new URL("../src/policy/audit.ts", import.meta.url));
   const src = readFileSync(auditSrc, "utf8");
-  assert.equal(/\bUPDATE\b/.test(src), false, "no UPDATE statement against audit");
-  assert.equal(/\bDELETE\b/.test(src), false, "no DELETE statement against audit");
+  // Strip line + block comments so prose (e.g. "row-removing") never trips the gate.
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .map((l) => l.replace(/\/\/.*$/, ""))
+    .join("\n");
+  assert.equal(/\bUPDATE\b/.test(code), false, "no UPDATE statement against audit");
+  assert.equal(/\bDELETE\b/.test(code), false, "no DELETE statement against audit");
 });

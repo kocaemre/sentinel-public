@@ -1,0 +1,31 @@
+# cloudflared named-tunnel config (DIST-01, D-02) — VERIFIED against
+# developers.cloudflare.com/cloudflare-one .../local-management/configuration-file/.
+#
+# This is a TEMPLATE committed for reference. The REAL config + credentials live on the
+# EC2 box at ~/.cloudflared/ and are NEVER tracked in git (threat T-05-16):
+#   - <UUID> is the tunnel id from `cloudflared tunnel create sentinel`
+#   - the credentials-file (~/.cloudflared/<UUID>.json) is a SECRET — box-only
+#
+# The named tunnel dials OUT from the box (no inbound ports — the EC2 security group is
+# OUTBOUND-only, RESEARCH Anti-Pattern). Cloudflare terminates TLS at the edge and routes
+# the stable hostname to the local Fastify proxy. A named tunnel + `tunnel route dns`
+# gives a STABLE hostname that survives reboots (NEVER a quick/trycloudflare tunnel,
+# whose URL rotates per restart and breaks multi-day adoption — D-02 / RESEARCH Pitfall 6).
+#
+# Setup (see deploy/DEPLOY.md):
+#   cloudflared tunnel login
+#   cloudflared tunnel create sentinel
+#   cloudflared tunnel route dns sentinel sentinel.<dev-domain>
+#   sudo cloudflared service install   # runs cloudflared as a systemd service, on boot
+
+tunnel: <UUID>
+credentials-file: /home/ubuntu/.cloudflared/<UUID>.json
+
+ingress:
+  # The stable public hostname agents point at (base-URL swap target, DIST-02).
+  - hostname: sentinel.<dev-domain>
+    # The local Fastify proxy (config.ts DEFAULT_PROXY_PORT = 8787).
+    service: http://localhost:8787
+  # REQUIRED catch-all — MUST be the LAST ingress rule (cloudflared rejects a config
+  # whose final rule has a hostname). Anything not matched above returns 404.
+  - service: http_status:404

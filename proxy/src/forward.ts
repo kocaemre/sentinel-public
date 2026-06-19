@@ -38,6 +38,21 @@ function failClosed(reply: FastifyReply, reason: string): void {
 }
 
 /**
+ * Read the external agent's identity off the request headers (Phase 5, D-06/D-07).
+ *
+ *  - `source`: the un-spoofable `CF-Connecting-IP` Cloudflare's edge SETS (overwrites)
+ *    — the honest distinct-agent key. Null when absent (a direct/local hit).
+ *  - `agent_label`: the OPTIONAL `X-Sentinel-Agent` self-label, clamped to 64 chars
+ *    (stored-injection defence is the parameterized INSERT; the clamp bounds size).
+ *    Never required for counting — the count is on `source`.
+ */
+function readAgentIdentity(req: FastifyRequest): { source: string | null; agent_label: string | null } {
+  const source = (req.headers["cf-connecting-ip"] as string | undefined) ?? null;
+  const agent_label = (req.headers["x-sentinel-agent"] as string | undefined)?.slice(0, 64) ?? null;
+  return { source, agent_label };
+}
+
+/**
  * Append ONE row to the append-only audit log for a block/step-up decision (OBS-01).
  *
  * Defensive by design: the unit/e2e paths that never boot the server have no commit
@@ -146,6 +161,12 @@ export async function forwardAndStream(
     }
     const requirements = ctx.requirements;
 
+    // (Phase 5, D-06/D-07) The external agent's un-spoofable edge IP (+ optional
+    // self-label) for honest distinct-agent attribution — read once, stamped on BOTH
+    // audit branches below. Attacker-influenced values are bound as DATA via the
+    // parameterized INSERT (audit.ts); the label is length-clamped (T-05-03).
+    const { source, agent_label } = readAgentIdentity(req);
+
     // (3) Decision seam (Phase 2 deterministic gate: PRE → [judge slot] → POST).
     const verdict = await decide(ctx);
     if (verdict.decision !== "allow") {
@@ -170,6 +191,8 @@ export async function forwardAndStream(
         target_host: ctx.targetHost,
         resource: ctx.resource,
         settlement_tx: null,
+        source,
+        agent_label,
       });
       // Block response carries the NAMED control + the protected atomic amount
       // (D-09/D-10), with Cache-Control: no-store (CLAUDE.md, never cache a block).
@@ -305,6 +328,8 @@ export async function forwardAndStream(
             target_host: ctx.targetHost,
             resource: ctx.resource,
             settlement_tx: settlementTxForAudit,
+            source,
+            agent_label,
           });
         } catch (err) {
           req.log.warn({ err: (err as Error).message }, "audit write failed (settled grant unaffected)");

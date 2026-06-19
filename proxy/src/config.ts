@@ -99,6 +99,24 @@ export const ConfigSchema = z.object({
    * chainId 5042002). NEVER `"arc"` — that is Arc MAINNET (A3 confirmed).
    */
   arcChain: z.string().min(1),
+
+  // ── Public-deployment hardening (Phase 5, D-05/D-07) ─────────────────────────
+  /**
+   * Per-source-IP rate limit: max requests per `rateLimitWindowMs` window, keyed on
+   * the un-spoofable `CF-Connecting-IP` edge header (D-05). Fail-closed 429 over the
+   * threshold; protects the LLM-judge hot path + metric integrity from spam.
+   */
+  rateLimitMax: z.number().int().positive(),
+  /** The rate-limit window in ms (D-05). Default 60000 (1 minute). */
+  rateLimitWindowMs: z.number().int().positive(),
+  /**
+   * The developer's own source (`CF-Connecting-IP` or `X-Sentinel-Agent` self-label)
+   * to EXCLUDE from the honest distinct-external-agents count (D-07). Allowed EMPTY at
+   * config-load exactly like `openRouterApiKey`: an unset `SENTINEL_DEV_SOURCE` excludes
+   * nothing (the count includes every distinct source). Surfaced on the dashboard so
+   * the figure stays auditable (RESEARCH Open Q2 RESOLVED).
+   */
+  devSource: z.string(),
 });
 
 export type Config = z.infer<typeof ConfigSchema> & {
@@ -131,6 +149,10 @@ const DEFAULT_SETTLEMENT_MODE = "stub";
 // Task-1-confirmed Arc-TESTNET chain string (A3): GATEWAY_DOMAINS.arcTestnet=26,
 // chainId 5042002. NEVER "arc" (that is mainnet, domain 26 alias on a different chain id).
 const DEFAULT_ARC_CHAIN = "arcTestnet";
+// Phase-5 public-deployment defaults (D-05). ~60 req/min/IP is the MVP threshold
+// (RESEARCH Pattern 5, explicitly tunable); the window is 1 minute.
+const DEFAULT_RATE_LIMIT_MAX = 60;
+const DEFAULT_RATE_LIMIT_WINDOW_MS = 60000;
 // Legit /paid resource sells for 0.001 USDC (1000 atomic) — the overpayment baseline.
 const DEFAULT_PRICE_MAP: Record<string, string> = {
   "https://upstream/paid": "1000",
@@ -160,6 +182,9 @@ const DEFAULT_PRICE_MAP: Record<string, string> = {
  *  - SENTINEL_SETTLEMENT_MODE  : "stub" (default) | "real" — real settles USDC on Arc testnet
  *  - SENTINEL_WALLET_PRIVATE_KEY: Arc-testnet EOA key (SECRET, never logged; default "" → real falls back to stub)
  *  - SENTINEL_ARC_CHAIN        : Circle Gateway chain name (default "arcTestnet" — NEVER "arc"/mainnet)
+ *  - SENTINEL_RATE_LIMIT_MAX   : per-IP max requests per window (default 60, D-05)
+ *  - SENTINEL_RATE_LIMIT_WINDOW_MS: rate-limit window in ms (default 60000, D-05)
+ *  - SENTINEL_DEV_SOURCE       : the dev's CF-Connecting-IP / self-label to exclude from the honest N (default "" → exclude nothing, D-07)
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const rawAllow = (env.SENTINEL_ALLOWLIST ?? `localhost:${DEFAULT_MOCK_PORT}`)
@@ -208,6 +233,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       DEFAULT_SETTLEMENT_MODE) as z.infer<typeof ConfigSchema>["settlementMode"],
     walletPrivateKey: env.SENTINEL_WALLET_PRIVATE_KEY ?? "",
     arcChain: env.SENTINEL_ARC_CHAIN ?? DEFAULT_ARC_CHAIN,
+    // Phase-5 public-deployment hardening (D-05/D-07).
+    rateLimitMax: env.SENTINEL_RATE_LIMIT_MAX
+      ? Number(env.SENTINEL_RATE_LIMIT_MAX)
+      : DEFAULT_RATE_LIMIT_MAX,
+    rateLimitWindowMs: env.SENTINEL_RATE_LIMIT_WINDOW_MS
+      ? Number(env.SENTINEL_RATE_LIMIT_WINDOW_MS)
+      : DEFAULT_RATE_LIMIT_WINDOW_MS,
+    devSource: env.SENTINEL_DEV_SOURCE ?? "",
   };
 
   const parsed = ConfigSchema.parse(candidate); // throws ZodError on malformed config → fail-closed

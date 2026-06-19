@@ -1,0 +1,54 @@
+# Sentinel proxy — systemd unit (DIST-01, D-01).
+#
+# Keeps the SINGLE Node/Fastify proxy process always-on on the EC2 t4g.small box
+# (Restart=always, start-on-boot). The proxy is the only writer of the shared SQLite
+# file on the persistent EBS volume.
+#
+# SECRETS (D-09, threat T-05-16): the wallet private key + OpenRouter key are NEVER
+# inline in this committed unit. They live ONLY in /etc/sentinel.env (chmod 600,
+# root-readable, never tracked in git), loaded via EnvironmentFile= below. Copy
+# deploy/sentinel.env.example -> /etc/sentinel.env on the box and fill the real values.
+#
+# Install (see deploy/DEPLOY.md):
+#   sudo cp deploy/sentinel.service /etc/systemd/system/sentinel.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sentinel
+#
+# Adjust User/Group/WorkingDirectory/ExecStart to the box's actual service user and
+# checkout path. The placeholders below assume a non-root `sentinel` user and the repo
+# checked out at /opt/sentinel.
+
+[Unit]
+Description=Sentinel x402 payment-security proxy
+Documentation=https://github.com/0xemrek/sentinel
+# Only start once the network (and DNS) is up — the proxy dials upstreams + the tunnel.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# A dedicated NON-root service user (least privilege — the proxy never needs root).
+User=sentinel
+Group=sentinel
+# The repo checkout on the box (run `pnpm install` HERE, never rsync node_modules —
+# better-sqlite3 is an arch-specific native addon, RESEARCH Pitfall 2).
+WorkingDirectory=/opt/sentinel
+# Secrets + the public-deployment posture come from this chmod-600 file (NOT git).
+EnvironmentFile=/etc/sentinel.env
+# Node 22 runs the proxy workspace's start command (tsx src/server.ts). Use an absolute
+# path to the workspace start; pnpm is invoked with the proxy filter.
+ExecStart=/usr/bin/pnpm -C /opt/sentinel -F sentinel-proxy start
+# Always restart on crash/exit — the always-on guarantee (RESEARCH Pitfall 1 / D-01).
+Restart=always
+RestartSec=2
+# Light hardening — the proxy needs no special privileges.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+# journald captures stdout/stderr (pino logs); secrets are never logged (T-04-01/07).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel
+
+[Install]
+WantedBy=multi-user.target

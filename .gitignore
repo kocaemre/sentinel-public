@@ -8,3 +8,6 @@ dist
 *.db
 *.db-wal
 *.db-shm
+
+# Claude Code background-shell harness artifacts
+.bg-shell/
