@@ -10,7 +10,9 @@
   "dependencies": {
     "@circle-fin/x402-batching": "^3.2.0",
     "@sentinel/shared": "workspace:*",
+    "@x402/evm": "^2.16.0",
     "better-sqlite3": "^12.11.1",
+    "express": "^5.2.1",
     "viem": "^2.52.2",
     "x402": "^1.2.0"
   },
