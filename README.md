@@ -74,9 +74,10 @@ pnpm install                 # on-box install (better-sqlite3 fetches a Node 22 
 pnpm -F sentinel-proxy test  # the full attack-coverage suite
 
 # record the killer-demo contrast (injection blocked vs legit allowed):
-bash scripts/record-demo.sh          # real Arc settlement (needs a funded reserve wallet)
-bash scripts/record-demo.sh --stub   # deterministic stub standby (no chain needed)
+bash scripts/record-demo.sh          # stub settlement — the local-mock demo path
 ```
+
+**On-chain integration.** Sentinel's real Circle Gateway + Arc-testnet settlement path is exercised by a one-time Gateway deposit (`proxy/src/settlement/deposit.ts` → a real Arc-testnet transaction) and by the [`gateway-binding`](proxy/test/gateway-binding.test.ts) tests. The local demo and the hosted endpoint both run in **stub settlement** by design — they screen and block, they don't move funds. A per-payment on-chain settle requires a real x402-compliant upstream (Circle's `GatewayClient` does its own x402 round-trip against the resource server); the local mock stands in for the **decision path** only, so `--real` against it correctly fails closed rather than settling.
 
 ## Project layout
 

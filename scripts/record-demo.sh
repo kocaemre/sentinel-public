@@ -8,9 +8,18 @@
 #   1. a FRESH SENTINEL_DB_PATH per run, so a previously-settled (paymentId, resource)
 #      never replay-blocks the legit /paid contrast (POLICY-06 is correct behavior, not
 #      a defect — but it must not silently break the recording).
-#   2. real Arc-testnet settlement by default (so the legit allow produces a REAL tx
-#      hash visible in the dashboard drill-down), with a one-flag `--stub` STANDBY so the
-#      recording still completes if testnet / faucet flakes.
+#   2. a settlement-mode flag (stub by default for the local-mock demo).
+#
+# IMPORTANT — real settlement needs a real x402 upstream, NOT this local mock.
+# Circle's `GatewayClient.pay(url)` does its OWN x402 round-trip and requires `url` to be
+# a real x402-compliant endpoint (a `PAYMENT-REQUIRED` header wired to the Circle Gateway
+# facilitator). The local attack-server is a stand-in for the DECISION path only — it
+# returns its 402 requirements in the body with placeholder payTo/asset, so `--real`
+# against it correctly FAILS CLOSED ("settlement not confirmed"), it does not settle.
+# So the local demo records in STUB (the hosted endpoint's real posture too). The real
+# Circle/Arc integration is proven on-chain by the one-time Gateway deposit
+# (`proxy/src/settlement/deposit.ts` → a real Arc-testnet tx) and by the gateway-binding
+# tests. Point `--real` at a real x402 testnet resource to settle a per-payment tx.
 #
 # It adds NO logic to the decision path — it only boots the mock upstream + proxy with
 # the right env and runs the existing demo CLI. Secrets are read from the environment
@@ -18,8 +27,8 @@
 # OPENROUTER_API_KEY (the live judge).
 #
 # Usage:
-#   bash scripts/record-demo.sh          # real Arc settlement (needs a funded wallet key)
-#   bash scripts/record-demo.sh --stub   # deterministic stub standby (no chain, no key)
+#   bash scripts/record-demo.sh          # stub settlement — the local-mock demo path
+#   bash scripts/record-demo.sh --real   # real settle (ONLY against a real x402 upstream)
 #
 set -euo pipefail
 
@@ -27,8 +36,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# ── settlement mode: real by default, --stub for the standby ──────────────────
-MODE="real"
+# ── settlement mode: stub by default (local-mock demo); --real needs a real upstream ──
+MODE="stub"
 for arg in "$@"; do
   case "$arg" in
     --stub) MODE="stub" ;;
@@ -37,6 +46,10 @@ for arg in "$@"; do
   esac
 done
 export SENTINEL_SETTLEMENT_MODE="$MODE"
+if [ "$MODE" = "real" ]; then
+  echo "⚠️  --real settles only against a REAL x402 upstream. Against the local mock it"
+  echo "    will fail closed ('settlement not confirmed') — that is correct, not a tx."
+fi
 
 # ── fresh DB per run so the legit /paid never replay-blocks (D-08) ────────────
 DB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sentinel-demo.XXXXXX")"
