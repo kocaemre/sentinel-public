@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Sentinel canlı güvenlik paneli — the demo surface (OBS-02/03, D-04).
+ * Sentinel live security dashboard — the demo surface (OBS-02/03, D-04).
  *
  * `"use client"`: this component NEVER imports `lib/db.ts` (the native better-sqlite3
  * module stays server-only — threat T-04-12/13). It polls the read-only route handlers
@@ -37,9 +37,9 @@ interface Metrics {
 
 /**
  * Cross-network read states (D-03). Reads now cross the Cloudflare tunnel, so the page
- * distinguishes: cold (no successful poll yet → tiles show `—`, pill BAĞLANIYOR), live
- * (CANLI), stale (no recent success but no hard error → BAĞLANTI BEKLENİYOR), and error
- * (a fetch rejected / non-OK → BAĞLANTI YOK + banner). On any failure the last good tile
+ * distinguishes: cold (no successful poll yet → tiles show `—`, pill CONNECTING), live
+ * (LIVE), stale (no recent success but no hard error → RECONNECTING), and error
+ * (a fetch rejected / non-OK → OFFLINE + banner). On any failure the last good tile
  * values are KEPT — never blanked to 0 (that would misreport traction as a crash).
  */
 type ConnState = "cold" | "live" | "stale" | "error";
@@ -90,37 +90,37 @@ function decisionClass(d: string): string {
 }
 
 function decisionLabel(d: string): string {
-  if (d === "allow") return "İZİN";
-  if (d === "step-up") return "EK ONAY";
-  return "BLOK";
+  if (d === "allow") return "ALLOW";
+  if (d === "step-up") return "STEP-UP";
+  return "BLOCK";
 }
 
 function fmtTime(ms: number): string {
   try {
-    return new Date(ms).toLocaleTimeString("tr-TR", { hour12: false });
+    return new Date(ms).toLocaleTimeString("en-US", { hour12: false });
   } catch {
     return String(ms);
   }
 }
 
 /**
- * Map a connection state to its inherited `.live-pill` variant + Turkish copy (D-03):
- *   cold  → BAĞLANIYOR (neutral, no pulse — the new `.live-pill.cold` rule)
- *   live  → CANLI (existing `.live-pill` allow color + pulse)
- *   stale → BAĞLANTI BEKLENİYOR (existing `.live-pill.stale`)
- *   error → BAĞLANTI YOK (the new `.live-pill.error` — `--block` colors, no pulse)
+ * Map a connection state to its inherited `.live-pill` variant + copy (D-03):
+ *   cold  → CONNECTING (neutral, no pulse — the new `.live-pill.cold` rule)
+ *   live  → LIVE (existing `.live-pill` allow color + pulse)
+ *   stale → RECONNECTING (existing `.live-pill.stale`)
+ *   error → OFFLINE (the new `.live-pill.error` — `--block` colors, no pulse)
  */
 function connPill(conn: ConnState): { cls: string; text: string } {
   switch (conn) {
     case "live":
-      return { cls: "live-pill", text: "CANLI" };
+      return { cls: "live-pill", text: "LIVE" };
     case "stale":
-      return { cls: "live-pill stale", text: "BAĞLANTI BEKLENİYOR" };
+      return { cls: "live-pill stale", text: "RECONNECTING" };
     case "error":
-      return { cls: "live-pill error", text: "BAĞLANTI YOK" };
+      return { cls: "live-pill error", text: "OFFLINE" };
     case "cold":
     default:
-      return { cls: "live-pill cold", text: "BAĞLANIYOR" };
+      return { cls: "live-pill cold", text: "CONNECTING" };
   }
 }
 
@@ -214,8 +214,8 @@ export default function Page() {
   // Cold load (no successful poll yet) shows `—`, NOT `0`, to distinguish "unknown" from
   // "genuinely zero" (UI-SPEC). Once a poll has ever succeeded, fall back to the last value.
   const cold = !everOkRef.current && metrics == null;
-  const screened = cold ? "—" : (metrics?.screened ?? 0).toLocaleString("tr-TR");
-  const blocked = cold ? "—" : (metrics?.blocked ?? 0).toLocaleString("tr-TR");
+  const screened = cold ? "—" : (metrics?.screened ?? 0).toLocaleString("en-US");
+  const blocked = cold ? "—" : (metrics?.blocked ?? 0).toLocaleString("en-US");
   const protectedUsdc = cold ? "—" : formatUsdc(metrics?.protectedAtomic ?? "0");
   const byType = metrics?.byType ?? [];
 
@@ -234,7 +234,7 @@ export default function Page() {
           <div>
             <div className="brand-title">Sentinel</div>
             <div className="brand-sub">
-              Otonom ödeme yapan ajanlar için canlı güvenlik proxy&apos;si
+              Live security proxy for autonomous paying agents
             </div>
           </div>
         </div>
@@ -247,42 +247,43 @@ export default function Page() {
       {/* Headline metrics (OBS-02). Cold load shows `—`, never `0` (UI-SPEC). */}
       <div className="metrics metrics--4">
         <div className="card">
-          <div className="card-label">Taranan Ödeme</div>
+          <div className="card-label">Payments Screened</div>
           <div className="card-value">{screened}</div>
-          <div className="card-foot">Sentinel&apos;den geçen tüm kararlar</div>
+          <div className="card-foot">All decisions through Sentinel</div>
         </div>
         <div className="card blocked">
-          <div className="card-label">Bloklanan Saldırı</div>
+          <div className="card-label">Attacks Blocked</div>
           <div className="card-value">{blocked}</div>
-          <div className="card-foot">Ödeme on-chain&apos;e gitmeden durduruldu</div>
+          <div className="card-foot">Stopped before the payment settled on-chain</div>
         </div>
         <div className="card protected">
-          <div className="card-label">Korunan USDC</div>
+          <div className="card-label">USDC Protected</div>
           <div className="card-value">{protectedUsdc}</div>
-          <div className="card-foot">Bloklanan ödemelerin toplam tutarı</div>
+          <div className="card-foot">Total value of blocked payments</div>
         </div>
         {/*
           Distinct external agents (D-06/D-07) — the honesty axis. NEUTRAL `--text` value
           (no .protected/.blocked modifier, no accent). The dev-exclusion `.card-foot` line
           is MANDATORY (what makes the figure read as honest). Cold → `—`; N=0 → `0` +
-          "Henüz dış ajan yok"; N>=1 → count + "{N} dış ajan korunuyor".
+          "No external agents yet"; N>=1 → count + "{N} external agent(s) protected".
         */}
         <div className="card">
-          <div className="card-label">KORUNAN AJAN</div>
+          <div className="card-label">PROTECTED AGENTS</div>
           <div className="card-value">
             {distinctAgents == null
               ? "—"
-              : distinctAgents.toLocaleString("tr-TR")}
+              : distinctAgents.toLocaleString("en-US")}
           </div>
           <div className="card-foot">
-            Geliştirici hariç, benzersiz dış ajan (kaynak IP)
+            Distinct external agents, developer excluded (source IP)
           </div>
           {distinctAgents != null && distinctAgents === 0 && (
-            <div className="card-foot card-foot-faint">Henüz dış ajan yok</div>
+            <div className="card-foot card-foot-faint">No external agents yet</div>
           )}
           {distinctAgents != null && distinctAgents >= 1 && (
             <div className="card-foot card-foot-faint">
-              {distinctAgents.toLocaleString("tr-TR")} dış ajan korunuyor
+              {distinctAgents.toLocaleString("en-US")} external agent
+              {distinctAgents === 1 ? "" : "s"} protected
             </div>
           )}
         </div>
@@ -292,38 +293,37 @@ export default function Page() {
         {/* Live verdict feed (OBS-02) */}
         <div className="panel">
           <div className="panel-head">
-            Canlı Karar Akışı
+            Live Decision Feed
             <span className="muted">
-              ~2sn yoklama · satıra tıkla → detay
-              {lastOk != null && ` · Son güncelleme: ${fmtTime(lastOk)}`}
+              ~2s polling · click a row → details
+              {lastOk != null && ` · Last updated: ${fmtTime(lastOk)}`}
             </span>
           </div>
           {/*
-            Connection error banner (D-03): on a hard fetch failure the pill goes BAĞLANTI
-            YOK and this one-line banner appears above the feed; it auto-clears on the next
+            Connection error banner (D-03): on a hard fetch failure the pill goes OFFLINE
+            and this one-line banner appears above the feed; it auto-clears on the next
             successful poll (no close button, no toast). The tiles KEEP their last values.
           */}
           {conn === "error" && (
             <div className="conn-banner">
-              Proxy&apos;ye ulaşılamıyor — panel son bilinen veriyi gösteriyor.
-              Yeniden deneniyor…
+              Can&apos;t reach the proxy — showing last known data. Retrying…
             </div>
           )}
           {cold ? (
-            <div className="empty">Panele bağlanılıyor…</div>
+            <div className="empty">Connecting to the dashboard…</div>
           ) : feed.length === 0 ? (
             <div className="empty">
-              Henüz karar yok — proxy üzerinden bir ödeme sür.
+              No decisions yet — drive a payment through the proxy.
             </div>
           ) : (
             <table className="feed">
               <thead>
                 <tr>
-                  <th>Zaman</th>
-                  <th>Karar</th>
-                  <th>Kontrol / Saldırı</th>
-                  <th>Hedef</th>
-                  <th>Tutar</th>
+                  <th>Time</th>
+                  <th>Decision</th>
+                  <th>Control / Attack</th>
+                  <th>Target</th>
+                  <th>Amount</th>
                 </tr>
               </thead>
               <tbody>
@@ -353,9 +353,9 @@ export default function Page() {
 
         {/* Attacks-blocked-by-type (OBS-03) */}
         <div className="panel">
-          <div className="panel-head">Saldırı Türüne Göre Blok</div>
+          <div className="panel-head">Blocks by Attack Type</div>
           {byType.length === 0 ? (
-            <div className="empty">Henüz bloklanan saldırı yok.</div>
+            <div className="empty">No attacks blocked yet.</div>
           ) : (
             byType.map((b) => (
               <div className="bytype-row" key={b.matched_attack}>
@@ -371,13 +371,13 @@ export default function Page() {
       {selectedId != null && (
         <>
           <div className="overlay" onClick={() => setSelectedId(null)} />
-          <aside className="drawer" role="dialog" aria-label="Karar detayı">
+          <aside className="drawer" role="dialog" aria-label="Decision details">
             <div className="drawer-head">
-              <h3>Karar #{selectedId}</h3>
+              <h3>Decision #{selectedId}</h3>
               <button
                 className="close-btn"
                 onClick={() => setSelectedId(null)}
-                aria-label="Kapat"
+                aria-label="Close"
               >
                 ×
               </button>
@@ -385,7 +385,7 @@ export default function Page() {
             {verdict ? (
               <Drill verdict={verdict} />
             ) : (
-              <div className="empty">Yükleniyor…</div>
+              <div className="empty">Loading…</div>
             )}
           </aside>
         </>
@@ -409,7 +409,7 @@ function Drill({ verdict }: { verdict: VerdictRow }) {
   return (
     <div>
       <div className="kv">
-        <div className="kv-key">Karar</div>
+        <div className="kv-key">Decision</div>
         <div className="kv-val">
           <span className={`badge ${decisionClass(verdict.decision)}`}>
             {decisionLabel(verdict.decision)}
@@ -418,33 +418,33 @@ function Drill({ verdict }: { verdict: VerdictRow }) {
       </div>
 
       <div className="kv">
-        <div className="kv-key">Zaman</div>
+        <div className="kv-key">Time</div>
         <div className="kv-val mono">{fmtTime(verdict.decided_at)}</div>
       </div>
 
       {verdict.control && (
         <div className="kv">
-          <div className="kv-key">Tetikleyen Kontrol</div>
+          <div className="kv-key">Triggering Control</div>
           <div className="kv-val mono">{verdict.control}</div>
         </div>
       )}
 
       <div className="kv">
-        <div className="kv-key">Eşleşen Saldırı</div>
+        <div className="kv-key">Matched Attack</div>
         <div className="kv-val mono">{verdict.matched_attack ?? "—"}</div>
       </div>
 
       <div className="kv">
-        <div className="kv-key">Enjeksiyon Tespiti</div>
+        <div className="kv-key">Injection Detected</div>
         <div className="kv-val">
           <span className={`flag ${verdict.injection_detected ? "on" : "off"}`}>
-            {verdict.injection_detected ? "EVET — enjeksiyon yakalandı" : "Hayır"}
+            {verdict.injection_detected ? "YES — injection caught" : "No"}
           </span>
         </div>
       </div>
 
       <div className="kv">
-        <div className="kv-key">Hedef</div>
+        <div className="kv-key">Target</div>
         <div className="kv-val mono">
           {verdict.target_host ?? "—"}
           {verdict.resource ? verdict.resource : ""}
@@ -452,13 +452,13 @@ function Drill({ verdict }: { verdict: VerdictRow }) {
       </div>
 
       <div className="kv">
-        <div className="kv-key">Tutar</div>
+        <div className="kv-key">Amount</div>
         <div className="kv-val mono">{formatUsdc(verdict.amount_atomic)} USDC</div>
       </div>
 
       {verdict.protected_atomic && (
         <div className="kv">
-          <div className="kv-key">Korunan Tutar</div>
+          <div className="kv-key">Protected Amount</div>
           <div className="kv-val mono">
             {formatUsdc(verdict.protected_atomic)} USDC
           </div>
@@ -479,7 +479,7 @@ function Drill({ verdict }: { verdict: VerdictRow }) {
             </a>
           ) : (
             <span className="kv-val mono" style={{ color: "var(--text-faint)" }}>
-              settle edilmedi (ödeme on-chain&apos;e gitmedi)
+              not settled (payment never went on-chain)
             </span>
           )}
         </div>
@@ -487,7 +487,7 @@ function Drill({ verdict }: { verdict: VerdictRow }) {
 
       {reasons.length > 0 && (
         <div className="kv">
-          <div className="kv-key">Gerekçe</div>
+          <div className="kv-key">Rationale</div>
           <ul className="reasons">
             {reasons.map((r, i) => (
               <li key={i}>{r}</li>

@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Sentinel — Canlı Güvenlik Paneli",
+  title: "Sentinel — Live Security Dashboard",
   description:
-    "Sentinel: otonom ödeme yapan AI ajanlarını x402 saldırılarına karşı koruyan güvenlik proxy'si. Taranan ödemeler, bloklanan saldırılar ve korunan USDC canlı.",
+    "Sentinel is a security proxy that protects autonomous paying AI agents from x402 attacks. Payments screened, attacks blocked, and USDC protected — live.",
 };
 
 export default function RootLayout({
@@ -13,7 +13,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="tr">
+    <html lang="en">
       <body>{children}</body>
     </html>
   );
