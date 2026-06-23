@@ -77,7 +77,12 @@ pnpm -F sentinel-proxy test  # the full attack-coverage suite
 bash scripts/record-demo.sh          # stub settlement — the local-mock demo path
 ```
 
-**On-chain integration.** Sentinel's real Circle Gateway + Arc-testnet settlement path is exercised by a one-time Gateway deposit (`proxy/src/settlement/deposit.ts` → a real Arc-testnet transaction) and by the [`gateway-binding`](proxy/test/gateway-binding.test.ts) tests. The local demo and the hosted endpoint both run in **stub settlement** by design — they screen and block, they don't move funds. A per-payment on-chain settle requires a real x402-compliant upstream (Circle's `GatewayClient` does its own x402 round-trip against the resource server); the local mock stands in for the **decision path** only, so `--real` against it correctly fails closed rather than settling.
+**On-chain integration.** Sentinel's Circle Gateway + Arc-testnet settlement path is real and verified end-to-end:
+- A one-time Gateway **deposit** (`proxy/src/settlement/deposit.ts`) settles a real Arc-testnet transaction on-chain (the immediate on-chain anchor).
+- A real **per-payment settlement** against a live x402 Gateway-batching seller is proven by `bash scripts/prove-real-settle.sh` — the funded buyer pays through Circle's testnet Gateway and the transfer is accepted (correct payer/recipient/amount on `eip155:5042002`). Circle Gateway is batched/gasless, so a payment returns a Circle transfer ID rather than an instant `0x` hash.
+- The check-to-use binding that keeps a compromised proxy from redirecting a settlement is covered by [`gateway-binding`](proxy/test/gateway-binding.test.ts).
+
+The local demo and the hosted endpoint both run in **stub settlement** by design — they screen and block, they don't move funds. A per-payment settle needs a real x402-compliant upstream (Circle's `GatewayClient` does its own x402 round-trip); the local mock stands in for the **decision path** only, so `--real` against it correctly fails closed rather than settling.
 
 ## Project layout
 
