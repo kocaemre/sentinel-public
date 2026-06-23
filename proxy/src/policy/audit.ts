@@ -189,9 +189,9 @@ export function openAudit(dbPath: string): Audit {
   const blockedStmt = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE decision != 'allow'");
   // OBS-03 attacks-by-type — byte-identical to dashboard/lib/queries.ts getAttacksByType.
   const byTypeStmt = db.prepare(
-    "SELECT COALESCE(matched_attack, 'unknown') AS matched_attack, COUNT(*) AS count " +
+    "SELECT COALESCE(matched_attack, control, 'unknown') AS matched_attack, COUNT(*) AS count " +
       "FROM audit WHERE decision != 'allow' " +
-      "GROUP BY COALESCE(matched_attack, 'unknown') ORDER BY count DESC",
+      "GROUP BY COALESCE(matched_attack, control, 'unknown') ORDER BY count DESC",
   );
   // D-07 honest distinct-agent count: distinct non-null sources, excluding the dev's
   // own source. `@devSource IS NULL OR source != @devSource` makes a null/empty
