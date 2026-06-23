@@ -122,6 +122,28 @@ body {
   animation: none;
 }
 
+/* Cold-load pill (BAĞLANIYOR) — neutral, no pulse; reuses existing neutral tokens. */
+.live-pill.cold {
+  color: var(--text-dim);
+  background: transparent;
+  border-color: var(--border);
+}
+.live-pill.cold .live-dot {
+  background: var(--text-dim);
+  animation: none;
+}
+
+/* Error/unreachable pill (BAĞLANTI YOK) — reuses the destructive --block tokens. */
+.live-pill.error {
+  color: var(--block);
+  background: var(--block-bg);
+  border-color: rgba(255, 92, 92, 0.3);
+}
+.live-pill.error .live-dot {
+  background: var(--block);
+  animation: none;
+}
+
 @keyframes pulse {
   0% {
     box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.5);
@@ -140,6 +162,31 @@ body {
   grid-template-columns: repeat(3, 1fr);
   gap: 16px;
   margin-bottom: 24px;
+}
+
+/* Four-tile headline grid (D-06/D-07 distinct-agents tile). The 920px rule below already
+   collapses .metrics to 1fr, so this needs no new breakpoint. */
+.metrics--4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+/* Faint second foot line on the distinct-agents tile (N=0 / N>=1 honesty copy). Reuses
+   the existing --text-faint token + .card-foot spacing; adds no new token. */
+.card-foot-faint {
+  color: var(--text-faint);
+  opacity: 0.7;
+  margin-top: 2px;
+}
+
+/* Connection error banner (D-03) above the feed — one line, --block colors, .empty-style
+   padding. Reuses existing tokens only. */
+.conn-banner {
+  padding: 11px 16px;
+  color: var(--block);
+  background: var(--block-bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 .card {
@@ -191,7 +238,8 @@ body {
 }
 
 @media (max-width: 920px) {
-  .metrics {
+  .metrics,
+  .metrics--4 {
     grid-template-columns: 1fr;
   }
   .grid {

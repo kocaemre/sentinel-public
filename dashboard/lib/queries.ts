@@ -50,6 +50,12 @@ export interface DashboardMetrics {
   blocked: number;
   /** USDC protected = JS-BigInt SUM of `protected_atomic` over blocked rows, as a string. */
   protectedAtomic: string;
+  /**
+   * Distinct external agents (by `CF-Connecting-IP`), the developer excluded (D-06/D-07).
+   * Carried by the proxy's `/api/metrics` endpoint (Plan 01); optional here so the pure
+   * SQLite `makeQueries` core (which does not compute it) still satisfies the type.
+   */
+  distinctAgents?: number;
 }
 
 /** One attacks-blocked-by-type bucket (OBS-03), grouped on `matched_attack`. */

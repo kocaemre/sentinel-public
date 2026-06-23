@@ -15,9 +15,8 @@ import { getMetrics, getAttacksByType } from "@/lib/db";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export function GET() {
-  const metrics = getMetrics();
-  const byType = getAttacksByType();
+export async function GET() {
+  const [metrics, byType] = await Promise.all([getMetrics(), getAttacksByType()]);
   return Response.json(
     { ...metrics, byType },
     { headers: { "Cache-Control": "no-store" } },

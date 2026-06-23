@@ -13,14 +13,14 @@ export const dynamic = "force-dynamic";
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
-export function GET(req: Request) {
+export async function GET(req: Request) {
   const raw = new URL(req.url).searchParams.get("limit");
   let limit = DEFAULT_LIMIT;
   if (raw !== null) {
     const parsed = Number.parseInt(raw, 10);
     if (Number.isFinite(parsed)) limit = Math.min(Math.max(parsed, 1), MAX_LIMIT);
   }
-  const feed = getFeed(limit);
+  const feed = await getFeed(limit);
   return Response.json(
     { feed },
     { headers: { "Cache-Control": "no-store" } },

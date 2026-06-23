@@ -1,166 +1,119 @@
-import { test, before, after } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import Database from "better-sqlite3";
-import { makeQueries, type Queries } from "./queries";
+import { createRequire } from "node:module";
+import Module from "node:module";
 
 /**
- * Read-path proof for the dashboard's read queries (OBS-02/03).
+ * Delegation proof for the dashboard's server-only read boundary `db.ts` (DIST-02, D-03).
  *
- * Strategy: seed a temp SQLite file with the AUTHORITATIVE `audit` schema (04-02-SUMMARY)
- * + a few rows (one settled allow, two blocks with different matched_attack), then open
- * it `{ readonly: true }` exactly as `db.ts` does and bind `makeQueries`. We test
- * `queries.ts` (the pure read core) directly: `db.ts` adds only the `import "server-only"`
- * boundary + the read-only open, and `server-only` throws under a plain node:test runner
- * (it is meant to fail outside an RSC bundle), so the pure core is the unit-test surface.
- * The protected BigInt sum is checked EXACTLY (never float).
+ * Phase 5 re-pointed the reads from a shared SQLite file to HTTP-over-tunnel. So this test
+ * no longer seeds/opens a SQLite file (the Phase 4 strategy) and imports no native SQLite
+ * addon and references no shared-db-path env var. Instead it proves db.ts DELEGATES to `./api-client`:
+ * it stubs `server-only` to a no-op (the real package throws outside an RSC bundle — that
+ * boundary is enforced by Next at build time) and stubs the global `fetch` so db.ts's four
+ * exported fns reach the real api-client, which reads `SENTINEL_API_BASE_URL` and fetches
+ * the proxy's JSON. We assert each db.ts fn returns the proxy payload (delegation works) and
+ * that money survives as an atomic STRING. The atomic-string fidelity is also proven
+ * directly in `api-client.test.ts`.
  *
- * Runner: node:test (NOT vitest). The repo (proxy/test/*) uses node:test; the plan's
- * verify block named vitest — Rule 3 tooling-reality deviation, documented in SUMMARY.
+ * Runner: node:test (NOT vitest) — matches the repo (proxy/test/* + api-client.test.ts).
  */
 
-let dir: string;
-let dbPath: string;
-let q: Queries;
+// tsx loads modules through CJS, so neutralize the `server-only` throw by pre-seeding the
+// CJS require cache with a no-op stub BEFORE db.ts (which `require`s it) is imported.
+const req = createRequire(import.meta.url);
+const serverOnlyPath = req.resolve("server-only");
+// Module._cache is an internal but stable CJS map.
+(Module as unknown as { _cache: Record<string, unknown> })._cache[serverOnlyPath] = {
+  id: serverOnlyPath,
+  filename: serverOnlyPath,
+  loaded: true,
+  exports: {},
+};
 
-// The exact `audit` DDL the proxy uses (proxy/src/policy/audit.ts), mirrored for seeding.
-const AUDIT_DDL =
-  "CREATE TABLE IF NOT EXISTS audit (" +
-  "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-  "decided_at INTEGER NOT NULL, " +
-  "decision TEXT NOT NULL, " +
-  "control TEXT, " +
-  "matched_attack TEXT, " +
-  "injection_detected INTEGER, " +
-  "reasons TEXT, " +
-  "amount_atomic TEXT, " +
-  "protected_atomic TEXT, " +
-  "target_host TEXT, " +
-  "resource TEXT, " +
-  "settlement_tx TEXT" +
-  ")";
+const BASE = "http://proxy.test";
+const HUGE_ATOMIC = "12345678901234567890";
 
-before(() => {
-  dir = mkdtempSync(join(tmpdir(), "sentinel-dash-"));
-  dbPath = join(dir, "sentinel-wallet.db");
+const METRICS_BODY = {
+  screened: 9,
+  blocked: 4,
+  protectedAtomic: HUGE_ATOMIC,
+  byType: [{ matched_attack: "prompt_injection_payment", count: 4 }],
+  distinctAgents: 3,
+};
+const FEED_BODY = { feed: [{ id: 2, amount_atomic: HUGE_ATOMIC }, { id: 1 }] };
+const VERDICT_BODY = { verdict: { id: 7, decision: "block", protected_atomic: HUGE_ATOMIC } };
 
-  // Seed as a normal writer (simulating the proxy), then close.
-  const seed = new Database(dbPath);
-  seed.pragma("journal_mode = WAL");
-  seed.exec(AUDIT_DDL);
-  const ins = seed.prepare(
-    "INSERT INTO audit (decided_at, decision, control, matched_attack, injection_detected, " +
-      "reasons, amount_atomic, protected_atomic, target_host, resource, settlement_tx) VALUES (" +
-      "@decided_at, @decision, @control, @matched_attack, @injection_detected, " +
-      "@reasons, @amount_atomic, @protected_atomic, @target_host, @resource, @settlement_tx)",
-  );
+type FetchCall = { url: string; init: RequestInit | undefined };
+let calls: FetchCall[];
+let originalFetch: typeof globalThis.fetch;
+let originalBase: string | undefined;
 
-  // 1) A settled legit allow — carries a real tx hash, no protected amount.
-  ins.run({
-    decided_at: 1000,
-    decision: "allow",
-    control: null,
-    matched_attack: null,
-    injection_detected: 0,
-    reasons: JSON.stringify(["within per-call cap", "payee allowed"]),
-    amount_atomic: "1000",
-    protected_atomic: null,
-    target_host: "api.example.com",
-    resource: "/paid",
-    settlement_tx: "0xabc123",
-  });
+beforeEach(() => {
+  calls = [];
+  originalFetch = globalThis.fetch;
+  originalBase = process.env.SENTINEL_API_BASE_URL;
+  process.env.SENTINEL_API_BASE_URL = BASE;
 
-  // 2) A blocked prompt-injection — the killer-demo catch (protected 50 USDC = 50_000_000 atomic).
-  ins.run({
-    decided_at: 2000,
-    decision: "block",
-    control: "judge",
-    matched_attack: "prompt_injection_payment",
-    injection_detected: 1,
-    reasons: JSON.stringify(["injected instruction in 402 description"]),
-    amount_atomic: "50000000",
-    protected_atomic: "50000000",
-    target_host: "evil.example.com",
-    resource: "/paid-injected",
-    settlement_tx: null,
-  });
-
-  // 3) A blocked overpayment drain (protected 1 atomic — tiny, to prove BigInt exactness).
-  ins.run({
-    decided_at: 3000,
-    decision: "block",
-    control: "overpayment",
-    matched_attack: "overpayment_drain",
-    injection_detected: 0,
-    reasons: JSON.stringify(["amount exceeds priced resource"]),
-    amount_atomic: "1",
-    protected_atomic: "1",
-    target_host: "evil.example.com",
-    resource: "/paid-overpriced",
-    settlement_tx: null,
-  });
-
-  seed.close();
-
-  // Open read-only exactly as db.ts does, and bind the pure queries.
-  const ro = new Database(dbPath, { readonly: true, fileMustExist: true });
-  q = makeQueries(ro);
+  // Route db.ts -> api-client -> fetch to a stub keyed on the requested path.
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, init });
+    let body: unknown = {};
+    if (url.endsWith("/api/metrics")) body = METRICS_BODY;
+    else if (url.includes("/api/feed")) body = FEED_BODY;
+    else if (url.includes("/api/verdict/")) body = VERDICT_BODY;
+    return { ok: true, status: 200, json: async () => body } as Response;
+  }) as typeof globalThis.fetch;
 });
 
-after(() => {
-  rmSync(dir, { recursive: true, force: true });
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  if (originalBase === undefined) delete process.env.SENTINEL_API_BASE_URL;
+  else process.env.SENTINEL_API_BASE_URL = originalBase;
 });
 
-test("getMetrics returns screened/blocked + exact BigInt protected sum (never float)", () => {
-  const m = q.getMetrics();
-  assert.equal(m.screened, 3, "3 total decisions screened");
-  assert.equal(m.blocked, 2, "2 non-allow decisions blocked");
-  // 50_000_000 + 1 summed in BigInt — exact, never a float that would round.
-  assert.equal(m.protectedAtomic, "50000001");
+test("db.ts loads without opening SQLite (server-only stubbed, no native addon)", async () => {
+  // If db.ts still opened a local database this import would do native work; it loads as a
+  // thin delegating module (HTTP-over-tunnel) instead.
+  const mod = await import("./db");
+  assert.equal(typeof mod.getMetrics, "function");
+  assert.equal(typeof mod.getFeed, "function");
+  assert.equal(typeof mod.getVerdict, "function");
+  assert.equal(typeof mod.getAttacksByType, "function");
+});
+
+test("getMetrics delegates to api-client (no-store fetch to the proxy) and returns its payload", async () => {
+  const { getMetrics } = await import("./db");
+  const m = await getMetrics();
+  assert.equal(calls.at(-1)!.url, `${BASE}/api/metrics`);
+  assert.equal(calls.at(-1)!.init?.cache, "no-store");
+  assert.equal(m.protectedAtomic, HUGE_ATOMIC);
   assert.equal(typeof m.protectedAtomic, "string");
+  assert.equal(m.distinctAgents, 3);
 });
 
-test("getFeed returns recent rows most-recent-first", () => {
-  const feed = q.getFeed(10);
-  assert.equal(feed.length, 3);
-  // ORDER BY id DESC → the last-inserted (overpayment_drain) is first.
-  assert.equal(feed[0].matched_attack, "overpayment_drain");
-  assert.equal(feed[2].decision, "allow");
-  assert.equal(feed[2].settlement_tx, "0xabc123");
+test("getFeed forwards the limit through api-client", async () => {
+  const { getFeed } = await import("./db");
+  const feed = await getFeed(25);
+  assert.equal(calls.at(-1)!.url, `${BASE}/api/feed?limit=25`);
+  assert.equal(feed.length, 2);
+  assert.equal(feed[0].amount_atomic, HUGE_ATOMIC);
 });
 
-test("getFeed respects the limit", () => {
-  assert.equal(q.getFeed(1).length, 1);
-});
-
-test("getVerdict returns one row by id with the full drill-down fields", () => {
-  const injectionRow = q
-    .getFeed(10)
-    .find((r) => r.matched_attack === "prompt_injection_payment");
-  assert.ok(injectionRow, "the injection block row exists");
-  const v = q.getVerdict(injectionRow!.id);
+test("getVerdict forwards the id through api-client", async () => {
+  const { getVerdict } = await import("./db");
+  const v = await getVerdict(7);
+  assert.equal(calls.at(-1)!.url, `${BASE}/api/verdict/7`);
   assert.ok(v);
-  assert.equal(v!.decision, "block");
-  assert.equal(v!.injection_detected, 1);
-  assert.equal(v!.matched_attack, "prompt_injection_payment");
-  assert.equal(v!.protected_atomic, "50000000");
-  assert.equal(v!.settlement_tx, null);
-  assert.deepEqual(JSON.parse(v!.reasons!), [
-    "injected instruction in 402 description",
-  ]);
+  assert.equal(v!.id, 7);
+  assert.equal(v!.protected_atomic, HUGE_ATOMIC);
 });
 
-test("getVerdict returns undefined for an absent id", () => {
-  assert.equal(q.getVerdict(99999), undefined);
-});
-
-test("getAttacksByType groups blocked rows on matched_attack", () => {
-  const buckets = q.getAttacksByType();
-  const map = new Map(buckets.map((b) => [b.matched_attack, b.count]));
-  assert.equal(map.get("prompt_injection_payment"), 1);
-  assert.equal(map.get("overpayment_drain"), 1);
-  // The allow row is NOT counted (decision != 'allow' filter).
-  assert.equal(buckets.reduce((s, b) => s + b.count, 0), 2);
+test("getAttacksByType delegates to api-client (reads /api/metrics byType)", async () => {
+  const { getAttacksByType } = await import("./db");
+  const buckets = await getAttacksByType();
+  assert.equal(calls.at(-1)!.url, `${BASE}/api/metrics`);
+  assert.equal(buckets[0].matched_attack, "prompt_injection_payment");
+  assert.equal(buckets[0].count, 4);
 });

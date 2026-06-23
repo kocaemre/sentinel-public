@@ -29,7 +29,7 @@ export async function GET(
     );
   }
 
-  const verdict = getVerdict(numId);
+  const verdict = await getVerdict(numId);
   if (!verdict) {
     return Response.json(
       { error: "verdict not found" },
