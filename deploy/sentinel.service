@@ -32,18 +32,22 @@ User=sentinel
 Group=sentinel
 # The repo checkout on the box (run `pnpm install` HERE, never rsync node_modules —
 # better-sqlite3 is an arch-specific native addon, RESEARCH Pitfall 2).
-WorkingDirectory=/opt/sentinel
+WorkingDirectory=/opt/sentinel/proxy
 # Secrets + the public-deployment posture come from this chmod-600 file (NOT git).
 EnvironmentFile=/etc/sentinel.env
-# Node 22 runs the proxy workspace's start command (tsx src/server.ts). Use an absolute
-# path to the workspace start; pnpm is invoked with the proxy filter.
-ExecStart=/usr/bin/pnpm -C /opt/sentinel -F sentinel-proxy start
+Environment=NODE_ENV=production
+# Invoke the workspace-local tsx binary DIRECTLY (NOT `pnpm start`): running pnpm as the
+# dedicated service user trips corepack (wrong HOME/package.json walk-up). tsx runs the
+# TypeScript entrypoint with no build step. @sentinel/shared resolves via the pnpm symlink.
+ExecStart=/opt/sentinel/node_modules/.bin/tsx /opt/sentinel/proxy/src/server.ts
 # Always restart on crash/exit — the always-on guarantee (RESEARCH Pitfall 1 / D-01).
 Restart=always
 RestartSec=2
 # Light hardening — the proxy needs no special privileges.
 NoNewPrivileges=true
 ProtectSystem=full
+# The SQLite DB lives here (root EBS volume; no separate /mnt/ebs on a single-volume box).
+ReadWritePaths=/var/lib/sentinel
 PrivateTmp=true
 # journald captures stdout/stderr (pino logs); secrets are never logged (T-04-01/07).
 StandardOutput=journal

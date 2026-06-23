@@ -1,8 +1,22 @@
 # Sentinel — Deployment Runbook (DIST-01)
 
 Stand the **unmodified** single Node/Fastify proxy up on a free always-on AWS EC2
-t4g.small behind a stable Cloudflare named tunnel, in **stub-settlement mode** with the
+behind a stable Cloudflare named tunnel, in **stub-settlement mode** with the
 strict public-deployment posture. No inbound ports; the tunnel dials out.
+
+> **Live deployment (2026-06) — actual setup, supersedes the t4g/ARM notes below:**
+> - **Box:** EC2 **t3.small** (x86_64, 2 GiB) + 2 GB swap, single **30 GB root EBS** volume
+>   (no separate `/mnt/ebs`). Ubuntu 24.04/26.04 x86. (t4g.small ARM is the free-tier
+>   alternative; pick the AMI arch to match the instance.)
+> - **Runtime:** Node 22 + pnpm (corepack) + cloudflared via apt. `pnpm install --filter
+>   sentinel-proxy...` in `/opt/sentinel`; SQLite at `/var/lib/sentinel` (service user owns it).
+> - **Service:** `sentinel.service` runs **tsx directly** (not `pnpm start` — corepack
+>   breaks under the service user). See the unit's NOTE.
+> - **Tunnel:** provisioned via the Cloudflare API with a scoped token (Argo Tunnel: Edit
+>   + DNS: Edit) using [`cf-tunnel-setup.sh`](./cf-tunnel-setup.sh) — creates the tunnel,
+>   sets ingress `→ localhost:8787`, the DNS CNAME, and installs the token-run cloudflared
+>   service. Avoids the interactive `cloudflared tunnel login` browser flow (§6 below).
+>   Public URL: `https://sentinel.0xemrek.dev`.
 
 > The proxy code is untouched by deployment. Plan 01 added the read endpoints + per-IP
 > rate limit + the `source` column the deployment relies on; this runbook only puts the
