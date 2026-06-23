@@ -108,7 +108,15 @@ PIDS+=("$!")
 wait_for "http://localhost:$MOCK_PORT/data" "mock upstream"
 
 echo "[2/3] starting Sentinel proxy …"
-pnpm -s -F sentinel-proxy start >/dev/null 2>&1 &
+# Load proxy/.env if present so the live judge (OPENROUTER_API_KEY) and the wallet key
+# are available — without it the injection would be fail-closed, not a genuine judge
+# catch. The script's already-exported vars (mode, DB, allowlist) take precedence over
+# the .env (Node --env-file does not override an already-set process.env variable).
+if [ -f "$ROOT/proxy/.env" ]; then
+  ( cd "$ROOT/proxy" && exec node --env-file=.env --import tsx src/server.ts ) >/dev/null 2>&1 &
+else
+  pnpm -s -F sentinel-proxy start >/dev/null 2>&1 &
+fi
 PIDS+=("$!")
 wait_for "http://localhost:$PROXY_PORT/api/metrics" "proxy"
 
@@ -118,6 +126,11 @@ pnpm -s -F reference-agent exec tsx src/demo.ts
 
 echo
 echo "============================================================"
-echo " done — open the dashboard drill-down to show the tx hash"
-echo " (real mode) and the live distinct-agents counter."
+echo " done. For the recorded demo, the live hosted surface is the"
+echo " best take — drive the same contrast through"
+echo "   https://sentinel.0xemrek.dev/https://upstream.0xemrek.dev/{paid,paid-injected}"
+echo " and record https://dashboard.0xemrek.dev reacting (the live"
+echo " judge catch). On-chain proof = the real Gateway deposit tx."
+echo " (This local run needs OPENROUTER_API_KEY exported for the"
+echo "  genuine judge catch; otherwise the injection is fail-closed.)"
 echo "============================================================"
