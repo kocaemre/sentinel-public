@@ -16,6 +16,10 @@ It's the fraud-protection layer for the agent economy: think of a credit card's 
 
 🔗 **Live dashboard:** https://dashboard.0xemrek.dev · **Live proxy:** https://sentinel.0xemrek.dev
 
+[![Sentinel live dashboard](docs/dashboard-dark.png)](https://dashboard.0xemrek.dev)
+
+<sub>The live dashboard — payments screened, attacks blocked, USDC protected, and distinct protected agents, updating in real time. Every number is a real proxy decision (no mock data).</sub>
+
 ---
 
 ## Why
