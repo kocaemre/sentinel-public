@@ -18,7 +18,7 @@ import { openAudit, type Audit, type AuditRow } from "../src/policy/audit.js";
  *     pre-existing rows read NULL for the new columns.
  *   - distinctAgents(devSource) counts DISTINCT non-null sources EXCLUDING devSource;
  *     null/"" devSource counts all non-null sources.
- *   - attacksByType() groups blocked rows by COALESCE(matched_attack,'unknown') desc —
+ *   - attacksByType() groups blocked rows by COALESCE(matched_attack,control,'unknown') desc —
  *     byte-identical to dashboard/lib/queries.ts getAttacksByType.
  *   - the module source contains NO UPDATE/DELETE token after the migration
  *     (append-only by code shape preserved through the ALTER TABLE ADD COLUMN).
@@ -137,26 +137,30 @@ test("audit-source: distinctAgents(devSource) counts distinct non-null sources e
   assert.equal(audit.distinctAgents(""), 3, "empty devSource counts all non-null sources");
 });
 
-test("audit-source: attacksByType groups blocked rows by COALESCE(matched_attack,'unknown') desc", () => {
+test("audit-source: attacksByType groups blocked rows by COALESCE(matched_attack,control,'unknown') desc", () => {
   const audit = openAudit(dbPath);
-  // Two prompt_injection blocks, one replay block, one block with NULL matched_attack,
-  // plus an allow (must NOT appear — only decision != 'allow' rows are bucketed).
+  // Two prompt_injection blocks (matched_attack set), one replay block, one control-only
+  // block (matched_attack NULL but control set → labeled by control), one fully-null block
+  // (matched_attack AND control NULL → 'unknown'), plus an allow (must NOT appear — only
+  // decision != 'allow' rows are bucketed).
   audit.insert(blockRow({ matched_attack: "prompt_injection_payment" }));
   audit.insert(blockRow({ matched_attack: "prompt_injection_payment" }));
   audit.insert(blockRow({ matched_attack: "replay" }));
-  audit.insert(blockRow({ matched_attack: null }));
+  audit.insert(blockRow({ matched_attack: null, control: "per_call_cap" }));
+  audit.insert(blockRow({ matched_attack: null, control: null }));
   audit.insert(baseRow({ decision: "allow", matched_attack: "none" }));
 
   const buckets = audit.attacksByType();
-  // Highest count first: prompt_injection_payment (2), then replay (1) + unknown (1).
+  // Highest count first: prompt_injection_payment (2), then per_call_cap (1) + replay (1) + unknown (1).
   assert.equal(buckets[0].matched_attack, "prompt_injection_payment");
   assert.equal(buckets[0].count, 2, "two prompt_injection blocks bucketed together");
   const names = buckets.map((b) => b.matched_attack);
   assert.ok(names.includes("replay"), "replay bucket present");
-  assert.ok(names.includes("unknown"), "NULL matched_attack folded into 'unknown'");
+  assert.ok(names.includes("per_call_cap"), "NULL matched_attack falls back to the control name");
+  assert.ok(names.includes("unknown"), "NULL matched_attack AND NULL control folded into 'unknown'");
   // The allow is never bucketed.
   const total = buckets.reduce((s, b) => s + b.count, 0);
-  assert.equal(total, 4, "only the 4 non-allow rows are bucketed (allow excluded)");
+  assert.equal(total, 5, "only the 5 non-allow rows are bucketed (allow excluded)");
 });
 
 test("audit-source: module source contains NO UPDATE/DELETE statement after the migration (D-03/T-05-04)", () => {
