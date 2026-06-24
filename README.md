@@ -1,13 +1,20 @@
-# Sentinel
+# 🛡️ Sentinel
 
 **A security proxy for autonomous paying AI agents.**
 
+[![Live Dashboard](https://img.shields.io/badge/Live-Dashboard-3b82f6?style=flat-square)](https://dashboard.0xemrek.dev)
+[![Live Endpoint](https://img.shields.io/badge/Live-Proxy%20Endpoint-34d399?style=flat-square)](https://sentinel.0xemrek.dev)
+[![Network](https://img.shields.io/badge/Arc-testnet-a78bfa?style=flat-square)](https://testnet.arcscan.app)
+[![Protocol](https://img.shields.io/badge/x402-payments-fbbf24?style=flat-square)](https://www.x402.org/)
+[![Built with](https://img.shields.io/badge/Circle-Gateway%20%C2%B7%20USDC-2563eb?style=flat-square)](https://www.circle.com/)
+
 Sentinel is a transparent forward proxy that guards agents paying over the [x402](https://www.x402.org/) protocol against payment attacks. Your agent's HTTP traffic flows through Sentinel; when an endpoint returns `402 Payment Required`, Sentinel steps in **before the payment settles** and decides **allow / step-up / block** — so a prompt-injected or malicious payment request never reaches the chain.
 
-> Built for the Lepton Agents Hackathon (Canteen × Circle, Arc blockchain).
+It's the fraud-protection layer for the agent economy: think of a credit card's "this charge looks suspicious — declined" — but autonomous, for AI agents paying per request in USDC on [Arc](https://testnet.arcscan.app).
 
-- **Live endpoint:** `https://sentinel.0xemrek.dev`
-- **Live dashboard:** `https://dashboard.0xemrek.dev`
+> Built for the **Lepton Agents Hackathon** (Canteen × Circle, Arc blockchain).
+
+🔗 **Live dashboard:** https://dashboard.0xemrek.dev · **Live proxy:** https://sentinel.0xemrek.dev
 
 ---
 
@@ -29,7 +36,7 @@ agent ──▶ Sentinel proxy ──▶ upstream
              └─ 4. allow → build X-PAYMENT, settle, replay ·· block → fail-closed
 ```
 
-The **deterministic policy engine is the gate** — per-call cap, hourly/daily budget, velocity, overpayment, replay, and denied-counterparty checks run in-process and decide the outcome. The **LLM judge is advisory**: it adds an explanation and an injection signal, but `injection_detected` is *never* the thing that enforces a block. This is deliberate — LLM-judge guardrails are bypassable, so the trust boundary is the deterministic policy, not the model. Malformed or timed-out judge output **fails closed** (block).
+The **deterministic policy engine is the gate** — per-call cap, hourly/daily budget, velocity, overpayment, replay, and denied-counterparty checks run in-process and decide the outcome. The **LLM judge is advisory**: an injection-hardened model (Google **Gemini 2.5 Flash** via **OpenRouter**, behind a model-agnostic adapter) reads every payment and flags injection, but `injection_detected` is *never* the thing that enforces a block. This is deliberate — LLM-judge guardrails are bypassable, so the trust boundary is the deterministic policy, not the model. Malformed or timed-out judge output **fails closed** (block).
 
 ## Adopt it — one line, no SDK, no config
 
