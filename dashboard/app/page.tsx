@@ -3,21 +3,20 @@
 /**
  * Sentinel live security dashboard — the demo surface (OBS-02/03, D-04).
  *
- * `"use client"`: this component NEVER imports `lib/db.ts` (the native better-sqlite3
- * module stays server-only — threat T-04-12/13). It polls the read-only route handlers
- * every ~2s with `setInterval(fetch, 2000)` (D-04 poll, NOT SSE) and renders:
- *   1) three headline cards — payments screened / attacks blocked / USDC protected
- *   2) a live verdict feed (most-recent-first, color-coded allow/block/step-up)
- *   3) a click-to-open per-verdict drill-down (rationale, matched_attack,
- *      injection_detected, settlement tx → arcscan when present)
- *   4) an attacks-blocked-by-type side panel (grouped on matched_attack)
+ * VISUAL CONTRACT: imported from the Claude Design "Sentinel.dc.html" (IBM Plex type,
+ * dark/light theme tokens in globals.css, token-driven inline styles, pulse status dot,
+ * cumulative-USDC area chart, attack-type bars, click-to-expand decision detail).
  *
- * STORED-XSS GUARD (threat T-04-11): every attacker-influenced string
- * (`matched_attack`, `reasons`, `resource`, `target_host`) is rendered as React text
- * content — NEVER `dangerouslySetInnerHTML`. React escapes it.
+ * DATA: the design's simulated random feed is NOT used. Every number is the REAL audit
+ * stream — polled from the read-only route handlers every ~2s (D-04 poll, NOT SSE):
+ *   /api/metrics → screened / blocked / USDC protected / distinct external agents / byType
+ *   /api/feed    → the live decision rows
+ *   /api/verdict/:id → the per-decision rationale on expand
  *
- * MONEY (threat T-04-08): `protectedAtomic` arrives as an atomic-unit STRING. We format
- * it to human USDC via BigInt string math for DISPLAY ONLY — float never re-enters data.
+ * STORED-XSS GUARD (T-04-11): every attacker-influenced string (matched_attack, reasons,
+ * resource, target_host, source, agent_label) renders as React text — never
+ * dangerouslySetInnerHTML. MONEY (T-04-08): protectedAtomic/amount_atomic arrive as
+ * atomic-unit STRINGs; BigInt formatting for DISPLAY only — float never re-enters data.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,6 +24,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const POLL_MS = 2000;
 const USDC_DECIMALS = 6n;
 const ARCSCAN_TX = "https://testnet.arcscan.app/tx/";
+const SERIES_CAP = 60;
 
 interface Metrics {
   screened: number;
@@ -35,13 +35,6 @@ interface Metrics {
   distinctAgents?: number;
 }
 
-/**
- * Cross-network read states (D-03). Reads now cross the Cloudflare tunnel, so the page
- * distinguishes: cold (no successful poll yet → tiles show `—`, pill CONNECTING), live
- * (LIVE), stale (no recent success but no hard error → RECONNECTING), and error
- * (a fetch rejected / non-OK → OFFLINE + banner). On any failure the last good tile
- * values are KEPT — never blanked to 0 (that would misreport traction as a crash).
- */
 type ConnState = "cold" | "live" | "stale" | "error";
 
 interface FeedRow {
@@ -56,6 +49,8 @@ interface FeedRow {
   target_host: string | null;
   resource: string | null;
   settlement_tx: string | null;
+  source?: string | null;
+  agent_label?: string | null;
 }
 
 interface VerdictRow extends FeedRow {
@@ -83,57 +78,109 @@ function formatUsdc(atomic: string | null): string {
   return neg ? `-${body}` : body;
 }
 
-function decisionClass(d: string): string {
-  if (d === "allow") return "allow";
-  if (d === "step-up") return "stepup";
-  return "block";
+/** atomic USDC string → number of whole USDC, for the chart/headline DISPLAY only. */
+function usdcNumber(atomic: string | null): number {
+  if (!atomic) return 0;
+  try {
+    return Number(BigInt(atomic)) / 1_000_000;
+  } catch {
+    return 0;
+  }
+}
+
+function fmtUsdMoney(n: number): string {
+  return (
+    "$" +
+    n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  );
 }
 
 function decisionLabel(d: string): string {
-  if (d === "allow") return "ALLOW";
+  if (d === "allow") return "ALLOWED";
   if (d === "step-up") return "STEP-UP";
-  return "BLOCK";
+  return "BLOCKED";
+}
+
+/** Decision → display colors (token-driven). */
+function decisionColors(d: string): { color: string; bg: string } {
+  if (d === "allow") return { color: "var(--good)", bg: "var(--good-soft)" };
+  if (d === "step-up") return { color: "var(--warn)", bg: "rgba(251,191,36,.13)" };
+  return { color: "var(--bad)", bg: "var(--bad-soft)" };
 }
 
 function fmtTime(ms: number): string {
   try {
-    return new Date(ms).toLocaleTimeString("en-US", { hour12: false });
+    return new Date(ms).toLocaleTimeString("en-GB", { hour12: false });
   } catch {
     return String(ms);
   }
 }
 
 /**
- * Map a connection state to its inherited `.live-pill` variant + copy (D-03):
- *   cold  → CONNECTING (neutral, no pulse — the new `.live-pill.cold` rule)
- *   live  → LIVE (existing `.live-pill` allow color + pulse)
- *   stale → RECONNECTING (existing `.live-pill.stale`)
- *   error → OFFLINE (the new `.live-pill.error` — `--block` colors, no pulse)
+ * Map a real audit attack/control key to a human label + accent color. Unknown keys
+ * are prettified (snake_case → Title Case) and shown in neutral grey — nothing is hidden
+ * or relabeled into something it isn't (the honesty discipline).
  */
-function connPill(conn: ConnState): { cls: string; text: string } {
+function attackMeta(key: string): { label: string; color: string } {
+  switch (key) {
+    case "prompt_injection_payment":
+      return { label: "Prompt Injection", color: "#fb7185" };
+    case "replay":
+      return { label: "Replay", color: "#a78bfa" };
+    case "per_call_cap":
+      return { label: "Per-Call Cap", color: "#3b82f6" };
+    case "overpayment_drain":
+    case "overpayment":
+      return { label: "Overpayment", color: "#fbbf24" };
+    case "velocity":
+      return { label: "Velocity", color: "#2dd4bf" };
+    case "denied":
+    case "denied_counterparty":
+      return { label: "Denied Counterparty", color: "#f472b6" };
+    case "hourly_budget":
+    case "daily_budget":
+    case "budget":
+      return { label: "Budget", color: "#f59e0b" };
+    case "unknown":
+      return { label: "Unknown", color: "#94a3b8" };
+    case "none":
+    case "":
+      return { label: "Unclassified", color: "#94a3b8" };
+    default:
+      return {
+        label: key
+          .replace(/_/g, " ")
+          .replace(/\b\w/g, (c) => c.toUpperCase()),
+        color: "#94a3b8",
+      };
+  }
+}
+
+/** Map a connection state to its status pill: text, color, and whether the dot pulses. */
+function connPill(conn: ConnState): { text: string; color: string; pulse: boolean } {
   switch (conn) {
     case "live":
-      return { cls: "live-pill", text: "LIVE" };
+      return { text: "LIVE", color: "var(--good)", pulse: true };
     case "stale":
-      return { cls: "live-pill stale", text: "RECONNECTING" };
+      return { text: "RECONNECTING", color: "var(--warn)", pulse: false };
     case "error":
-      return { cls: "live-pill error", text: "OFFLINE" };
+      return { text: "OFFLINE", color: "var(--bad)", pulse: false };
     case "cold":
     default:
-      return { cls: "live-pill cold", text: "CONNECTING" };
+      return { text: "CONNECTING", color: "var(--muted)", pulse: false };
   }
 }
 
 export default function Page() {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [feed, setFeed] = useState<FeedRow[]>([]);
+  const [series, setSeries] = useState<number[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [verdict, setVerdict] = useState<VerdictRow | null>(null);
   const [conn, setConn] = useState<ConnState>("cold");
   const [lastOk, setLastOk] = useState<number | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const lastOkRef = useRef<number>(0);
-  // True once at least one poll has SUCCEEDED — gates the cold `—` placeholder so a later
-  // failure keeps showing real numbers instead of regressing to the cold em-dash.
   const everOkRef = useRef<boolean>(false);
 
   const poll = useCallback(async () => {
@@ -142,35 +189,32 @@ export default function Page() {
         fetch("/api/metrics", { cache: "no-store" }),
         fetch("/api/feed?limit=50", { cache: "no-store" }),
       ]);
-      // A non-OK status (tunnel/proxy down → 5xx) is a hard error, not a success.
       if (!mRes.ok || !fRes.ok) {
         throw new Error(`read failed: metrics ${mRes.status} feed ${fRes.status}`);
       }
-      // Only overwrite tile/feed state on a genuine success — never blank to 0 on failure.
-      setMetrics(await mRes.json());
+      const m: Metrics = await mRes.json();
+      setMetrics(m);
       const data = await fRes.json();
       setFeed(data.feed ?? []);
+      // Accumulate the cumulative-USDC-protected series client-side (we sample the real
+      // running total on each successful poll — honest, monotonic, capped).
+      setSeries((prev) => [...prev, usdcNumber(m.protectedAtomic)].slice(-SERIES_CAP));
       const now = Date.now();
       lastOkRef.current = now;
       everOkRef.current = true;
       setLastOk(now);
       setConn("live");
     } catch {
-      // Hard failure (reject or non-OK): surface the error pill + banner, but KEEP the last
-      // good metrics/feed in state (do not setMetrics/setFeed) so traction is never blanked.
       setConn("error");
     }
   }, []);
 
-  // Poll metrics + feed every ~2s (D-04), with cleanup on unmount.
   useEffect(() => {
     poll();
     const t = setInterval(poll, POLL_MS);
     return () => clearInterval(t);
   }, [poll]);
 
-  // Decay live → stale if no successful poll in ~3 ticks (but a hard error stays "error"
-  // until the next success clears it; cold stays cold until the first success).
   useEffect(() => {
     const t = setInterval(() => {
       setConn((prev) => {
@@ -181,7 +225,12 @@ export default function Page() {
     return () => clearInterval(t);
   }, []);
 
-  // Fetch the drill-down when a row is selected.
+  // Reflect the theme on <html> so the [data-theme] token set re-skins everything.
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  // Fetch the drill-down rationale when a row is selected.
   useEffect(() => {
     if (selectedId == null) {
       setVerdict(null);
@@ -201,294 +250,591 @@ export default function Page() {
     };
   }, [selectedId]);
 
-  // Close the drawer on Escape.
-  useEffect(() => {
-    if (selectedId == null) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSelectedId(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [selectedId]);
-
-  // Cold load (no successful poll yet) shows `—`, NOT `0`, to distinguish "unknown" from
-  // "genuinely zero" (UI-SPEC). Once a poll has ever succeeded, fall back to the last value.
   const cold = !everOkRef.current && metrics == null;
   const screened = cold ? "—" : (metrics?.screened ?? 0).toLocaleString("en-US");
   const blocked = cold ? "—" : (metrics?.blocked ?? 0).toLocaleString("en-US");
-  const protectedUsdc = cold ? "—" : formatUsdc(metrics?.protectedAtomic ?? "0");
+  const usdcVal = usdcNumber(metrics?.protectedAtomic ?? "0");
+  const protectedUsdc = cold ? "—" : fmtUsdMoney(usdcVal);
   const byType = metrics?.byType ?? [];
-
-  // Distinct external agents (dev-excluded). `null` while unknown (cold) → render `—`.
   const distinctAgents = cold ? null : metrics?.distinctAgents ?? 0;
 
   const pill = connPill(conn);
 
+  // Stat cards (token-driven dots/values).
+  const stats = [
+    {
+      label: "Payments Screened",
+      value: screened,
+      caption: "All decisions through Sentinel",
+      color: "var(--text)",
+      dot: "var(--accent)",
+    },
+    {
+      label: "Attacks Blocked",
+      value: blocked,
+      caption: "Stopped before settling on-chain",
+      color: "var(--bad)",
+      dot: "var(--bad)",
+    },
+    {
+      label: "USDC Protected",
+      value: protectedUsdc,
+      caption: "Value of blocked payments",
+      color: "var(--accent)",
+      dot: "var(--accent)",
+    },
+    {
+      label: "Protected Agents",
+      value: distinctAgents == null ? "—" : distinctAgents.toLocaleString("en-US"),
+      caption: "Distinct external agents · developer excluded",
+      color: "var(--text)",
+      dot: "var(--good)",
+    },
+  ];
+
+  // Attacks-by-type bars (real counts → pct of the max).
+  const attackBars = byType.map((b) => {
+    const meta = attackMeta(b.matched_attack);
+    return { key: b.matched_attack, label: meta.label, color: meta.color, count: b.count };
+  });
+  const maxCount = Math.max(1, ...attackBars.map((a) => a.count));
+
+  // Cumulative-USDC area/line path (matches the design's 100×40 viewBox).
+  const W = 100;
+  const H = 40;
+  const ser = series.length > 1 ? series : [usdcVal, usdcVal];
+  const max = Math.max(...ser);
+  const min = Math.min(...ser);
+  const span = max - min || 1;
+  const n = ser.length;
+  const X = (i: number) => (n > 1 ? (i / (n - 1)) * W : 0);
+  const Y = (v: number) => H - ((v - min) / span) * (H - 4) - 2;
+  let linePath = "";
+  ser.forEach((v, i) => {
+    linePath += (i ? "L" : "M") + X(i).toFixed(2) + " " + Y(v).toFixed(2) + " ";
+  });
+  const areaPath =
+    "M0 " +
+    H +
+    " " +
+    ser.map((v, i) => "L" + X(i).toFixed(2) + " " + Y(v).toFixed(2)).join(" ") +
+    " L" +
+    W +
+    " " +
+    H +
+    " Z";
+
+  const agentOf = (r: FeedRow) =>
+    r.agent_label || r.source || r.target_host || "—";
+
   return (
-    <div className="shell">
-      <div className="topbar">
-        <div className="brand">
-          <div className="brand-mark" aria-hidden>
-            S
-          </div>
-          <div>
-            <div className="brand-title">Sentinel</div>
-            <div className="brand-sub">
-              Live security proxy for autonomous paying agents
+    <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--text)" }}>
+      <div style={{ maxWidth: 1180, margin: "0 auto", padding: "34px 28px 56px" }}>
+        {/* Header */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+            flexWrap: "wrap",
+            marginBottom: 26,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+            <div
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 12,
+                background: "var(--accent)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: 21,
+              }}
+              aria-hidden
+            >
+              S
+            </div>
+            <div>
+              <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-.02em" }}>
+                Sentinel
+              </div>
+              <div style={{ fontSize: 13, color: "var(--muted)" }}>
+                Live security proxy for autonomous paying agents
+              </div>
             </div>
           </div>
-        </div>
-        <span className={pill.cls}>
-          <span className="live-dot" />
-          {pill.text}
-        </span>
-      </div>
-
-      {/* Headline metrics (OBS-02). Cold load shows `—`, never `0` (UI-SPEC). */}
-      <div className="metrics metrics--4">
-        <div className="card">
-          <div className="card-label">Payments Screened</div>
-          <div className="card-value">{screened}</div>
-          <div className="card-foot">All decisions through Sentinel</div>
-        </div>
-        <div className="card blocked">
-          <div className="card-label">Attacks Blocked</div>
-          <div className="card-value">{blocked}</div>
-          <div className="card-foot">Stopped before the payment settled on-chain</div>
-        </div>
-        <div className="card protected">
-          <div className="card-label">USDC Protected</div>
-          <div className="card-value">{protectedUsdc}</div>
-          <div className="card-foot">Total value of blocked payments</div>
-        </div>
-        {/*
-          Distinct external agents (D-06/D-07) — the honesty axis. NEUTRAL `--text` value
-          (no .protected/.blocked modifier, no accent). The dev-exclusion `.card-foot` line
-          is MANDATORY (what makes the figure read as honest). Cold → `—`; N=0 → `0` +
-          "No external agents yet"; N>=1 → count + "{N} external agent(s) protected".
-        */}
-        <div className="card">
-          <div className="card-label">PROTECTED AGENTS</div>
-          <div className="card-value">
-            {distinctAgents == null
-              ? "—"
-              : distinctAgents.toLocaleString("en-US")}
-          </div>
-          <div className="card-foot">
-            Distinct external agents, developer excluded (source IP)
-          </div>
-          {distinctAgents != null && distinctAgents === 0 && (
-            <div className="card-foot card-foot-faint">No external agents yet</div>
-          )}
-          {distinctAgents != null && distinctAgents >= 1 && (
-            <div className="card-foot card-foot-faint">
-              {distinctAgents.toLocaleString("en-US")} external agent
-              {distinctAgents === 1 ? "" : "s"} protected
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 14px",
+                borderRadius: 999,
+                background: "var(--accent-soft)",
+                border: "1px solid var(--border)",
+              }}
+            >
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: pill.color,
+                  animation: pill.pulse ? "pulse 1.6s infinite" : "none",
+                }}
+              />
+              <span
+                className="mono"
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  letterSpacing: ".08em",
+                  color: pill.color,
+                }}
+              >
+                {pill.text}
+              </span>
             </div>
-          )}
+            <button
+              onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                font: "500 13px 'IBM Plex Sans', system-ui",
+                padding: "9px 14px",
+                borderRadius: 999,
+                border: "1px solid var(--border)",
+                background: "var(--panel)",
+                color: "var(--text)",
+                cursor: "pointer",
+              }}
+            >
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: "var(--accent)",
+                  display: "inline-block",
+                }}
+              />
+              {theme === "dark" ? "Light mode" : "Dark mode"}
+            </button>
+          </div>
         </div>
-      </div>
 
-      <div className="grid">
-        {/* Live verdict feed (OBS-02) */}
-        <div className="panel">
-          <div className="panel-head">
-            Live Decision Feed
-            <span className="muted">
-              ~2s polling · click a row → details
-              {lastOk != null && ` · Last updated: ${fmtTime(lastOk)}`}
+        {/* Stat cards */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: 14,
+            marginBottom: 14,
+          }}
+        >
+          {stats.map((st) => (
+            <div
+              key={st.label}
+              style={{
+                background: "var(--panel)",
+                border: "1px solid var(--border)",
+                borderRadius: 14,
+                padding: 20,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 16 }}>
+                <span
+                  style={{ width: 7, height: 7, borderRadius: "50%", background: st.dot }}
+                />
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    letterSpacing: ".06em",
+                    textTransform: "uppercase",
+                    color: "var(--muted)",
+                  }}
+                >
+                  {st.label}
+                </span>
+              </div>
+              <div
+                className="mono"
+                style={{
+                  fontSize: 33,
+                  fontWeight: 600,
+                  letterSpacing: "-.02em",
+                  color: st.color,
+                }}
+              >
+                {st.value}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 9 }}>
+                {st.caption}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Chart + attacks-by-type */}
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 14 }}>
+          <div
+            style={{
+              flex: 2,
+              minWidth: 360,
+              background: "var(--panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 14,
+              padding: 20,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>USDC protected · cumulative</div>
+              <div className="mono" style={{ fontSize: 13, color: "var(--accent)" }}>
+                {cold ? "—" : fmtUsdMoney(usdcVal)}
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", margin: "4px 0 12px" }}>
+              Value of payments stopped before settling on-chain
+            </div>
+            <svg
+              viewBox="0 0 100 40"
+              preserveAspectRatio="none"
+              style={{ width: "100%", height: 170, display: "block" }}
+            >
+              <path d={areaPath} fill="var(--accent)" fillOpacity={0.12} />
+              <path d={linePath} fill="none" stroke="var(--accent)" strokeWidth={0.7} />
+            </svg>
+          </div>
+
+          <div
+            style={{
+              flex: 1,
+              minWidth: 280,
+              background: "var(--panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 14,
+              padding: 20,
+            }}
+          >
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 18 }}>
+              Blocks by attack type
+            </div>
+            {attackBars.length === 0 ? (
+              <div
+                style={{
+                  fontSize: 13,
+                  color: "var(--muted)",
+                  padding: "24px 0",
+                  textAlign: "center",
+                }}
+              >
+                No attacks blocked yet.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                {attackBars.map((a) => (
+                  <div key={a.key}>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        fontSize: 12.5,
+                        marginBottom: 6,
+                      }}
+                    >
+                      <span>{a.label}</span>
+                      <span className="mono" style={{ color: "var(--muted)" }}>
+                        {a.count}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        height: 7,
+                        borderRadius: 4,
+                        background: "var(--grid)",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <div
+                        style={{
+                          height: "100%",
+                          borderRadius: 4,
+                          width: `${Math.round((a.count / maxCount) * 100)}%`,
+                          background: a.color,
+                          transition: "width .4s ease",
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Live decision feed */}
+        <div
+          style={{
+            background: "var(--panel)",
+            border: "1px solid var(--border)",
+            borderRadius: 14,
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
+              flexWrap: "wrap",
+              padding: "16px 20px",
+              borderBottom: "1px solid var(--border)",
+            }}
+          >
+            <div>
+              <span style={{ fontSize: 14, fontWeight: 600 }}>Live decision feed</span>
+              <span style={{ fontSize: 12, color: "var(--muted)", marginLeft: 8 }}>
+                ~2s polling · click a row for details
+              </span>
+            </div>
+            <span className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>
+              updated {lastOk != null ? fmtTime(lastOk) : "—"}
             </span>
           </div>
-          {/*
-            Connection error banner (D-03): on a hard fetch failure the pill goes OFFLINE
-            and this one-line banner appears above the feed; it auto-clears on the next
-            successful poll (no close button, no toast). The tiles KEEP their last values.
-          */}
+
           {conn === "error" && (
-            <div className="conn-banner">
+            <div
+              style={{
+                padding: "10px 20px",
+                fontSize: 12.5,
+                color: "var(--bad)",
+                background: "var(--bad-soft)",
+                borderBottom: "1px solid var(--border)",
+              }}
+            >
               Can&apos;t reach the proxy — showing last known data. Retrying…
             </div>
           )}
-          {cold ? (
-            <div className="empty">Connecting to the dashboard…</div>
-          ) : feed.length === 0 ? (
-            <div className="empty">
-              No decisions yet — drive a payment through the proxy.
-            </div>
-          ) : (
-            <table className="feed">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Decision</th>
-                  <th>Control / Attack</th>
-                  <th>Target</th>
-                  <th>Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {feed.map((row) => (
-                  <tr
-                    key={row.id}
-                    className={selectedId === row.id ? "selected" : ""}
-                    onClick={() => setSelectedId(row.id)}
-                  >
-                    <td className="mono">{fmtTime(row.decided_at)}</td>
-                    <td>
-                      <span className={`badge ${decisionClass(row.decision)}`}>
-                        {decisionLabel(row.decision)}
-                      </span>
-                    </td>
-                    <td className="mono">
-                      {row.matched_attack ?? row.control ?? "—"}
-                    </td>
-                    <td className="mono">{row.target_host ?? "—"}</td>
-                    <td className="mono">{formatUsdc(row.amount_atomic)} USDC</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
 
-        {/* Attacks-blocked-by-type (OBS-03) */}
-        <div className="panel">
-          <div className="panel-head">Blocks by Attack Type</div>
-          {byType.length === 0 ? (
-            <div className="empty">No attacks blocked yet.</div>
-          ) : (
-            byType.map((b) => (
-              <div className="bytype-row" key={b.matched_attack}>
-                <span className="bytype-name">{b.matched_attack}</span>
-                <span className="bytype-count">{b.count}</span>
+          <div style={{ overflowX: "auto" }}>
+            <div style={{ minWidth: 620 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "90px 1fr 130px 120px 1fr",
+                  padding: "10px 20px",
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                  letterSpacing: ".05em",
+                  textTransform: "uppercase",
+                  color: "var(--muted)",
+                  borderBottom: "1px solid var(--border)",
+                }}
+              >
+                <span>Time</span>
+                <span>Agent</span>
+                <span style={{ textAlign: "right" }}>Amount</span>
+                <span style={{ textAlign: "center" }}>Decision</span>
+                <span style={{ textAlign: "right" }}>Attack type</span>
               </div>
-            ))
+
+              {cold ? (
+                <div style={{ padding: 34, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                  Connecting to the secure stream…
+                </div>
+              ) : feed.length === 0 ? (
+                <div style={{ padding: 34, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                  No decisions yet — drive a payment through the proxy.
+                </div>
+              ) : (
+                feed.slice(0, 12).map((r) => {
+                  const dc = decisionColors(r.decision);
+                  const atkKey = r.matched_attack ?? r.control;
+                  const atk = atkKey ? attackMeta(atkKey) : null;
+                  return (
+                    <div
+                      key={r.id}
+                      onClick={() => setSelectedId(selectedId === r.id ? null : r.id)}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "90px 1fr 130px 120px 1fr",
+                        alignItems: "center",
+                        padding: "12px 20px",
+                        fontSize: 13,
+                        borderBottom: "1px solid var(--border)",
+                        cursor: "pointer",
+                        background:
+                          r.id === selectedId ? "var(--accent-soft)" : "transparent",
+                      }}
+                    >
+                      <span className="mono" style={{ color: "var(--muted)" }}>
+                        {fmtTime(r.decided_at)}
+                      </span>
+                      <span className="mono">{agentOf(r)}</span>
+                      <span
+                        className="mono"
+                        style={{ textAlign: "right" }}
+                      >
+                        {formatUsdc(r.amount_atomic)} USDC
+                      </span>
+                      <span style={{ textAlign: "center" }}>
+                        <span
+                          className="mono"
+                          style={{
+                            fontSize: 10.5,
+                            fontWeight: 600,
+                            padding: "3px 9px",
+                            borderRadius: 5,
+                            color: dc.color,
+                            background: dc.bg,
+                          }}
+                        >
+                          {decisionLabel(r.decision)}
+                        </span>
+                      </span>
+                      <span style={{ textAlign: "right", color: atk ? atk.color : "var(--muted)" }}>
+                        {atk ? atk.label : "—"}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* Expanded decision detail (real verdict — rationale, injection, settlement tx) */}
+          {selectedId != null && (
+            <DetailPanel
+              id={selectedId}
+              verdict={verdict}
+              row={feed.find((f) => f.id === selectedId) ?? null}
+              agentOf={agentOf}
+            />
           )}
         </div>
       </div>
-
-      {/* Per-verdict drill-down drawer (OBS-03) */}
-      {selectedId != null && (
-        <>
-          <div className="overlay" onClick={() => setSelectedId(null)} />
-          <aside className="drawer" role="dialog" aria-label="Decision details">
-            <div className="drawer-head">
-              <h3>Decision #{selectedId}</h3>
-              <button
-                className="close-btn"
-                onClick={() => setSelectedId(null)}
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
-            {verdict ? (
-              <Drill verdict={verdict} />
-            ) : (
-              <div className="empty">Loading…</div>
-            )}
-          </aside>
-        </>
-      )}
     </div>
   );
 }
 
-/** The drill-down body — all attacker-influenced strings render as escaped React text. */
-function Drill({ verdict }: { verdict: VerdictRow }) {
+/** The expanded decision detail — design-style inline panel, enriched with real fields. */
+function DetailPanel({
+  id,
+  verdict,
+  row,
+  agentOf,
+}: {
+  id: number;
+  verdict: VerdictRow | null;
+  row: FeedRow | null;
+  agentOf: (r: FeedRow) => string;
+}) {
+  const src = verdict ?? row;
+  if (!src) {
+    return (
+      <div style={{ padding: "18px 20px", borderTop: "1px solid var(--border)", background: "var(--panel2)", color: "var(--muted)", fontSize: 13 }}>
+        Loading decision #{id}…
+      </div>
+    );
+  }
+  const dc = decisionColors(src.decision);
+  const atkKey = src.matched_attack ?? src.control;
+  const atk = atkKey ? attackMeta(atkKey) : null;
+
   let reasons: string[] = [];
-  if (verdict.reasons) {
+  if (verdict?.reasons) {
     try {
       const parsed = JSON.parse(verdict.reasons);
       if (Array.isArray(parsed)) reasons = parsed.map(String);
+      else reasons = [verdict.reasons];
     } catch {
       reasons = [verdict.reasons];
     }
   }
 
-  return (
+  const cell = (key: string, val: React.ReactNode, valColor?: string) => (
     <div>
-      <div className="kv">
-        <div className="kv-key">Decision</div>
-        <div className="kv-val">
-          <span className={`badge ${decisionClass(verdict.decision)}`}>
-            {decisionLabel(verdict.decision)}
+      <div style={{ color: "var(--muted)", fontSize: 11, marginBottom: 4 }}>{key}</div>
+      <div
+        className="mono"
+        style={{ color: valColor ?? "var(--text)", wordBreak: "break-all" }}
+      >
+        {val}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ padding: "18px 20px", borderTop: "1px solid var(--border)", background: "var(--panel2)" }}>
+      <div
+        style={{
+          fontSize: 11,
+          textTransform: "uppercase",
+          letterSpacing: ".06em",
+          color: "var(--muted)",
+          marginBottom: 12,
+        }}
+      >
+        Decision detail · #{id}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+          gap: 16,
+          fontSize: 13,
+        }}
+      >
+        {cell("Agent", agentOf(src))}
+        {cell("Amount", `${formatUsdc(src.amount_atomic)} USDC`)}
+        {cell(
+          "Decision",
+          <span style={{ color: dc.color, fontWeight: 600 }}>{decisionLabel(src.decision)}</span>,
+        )}
+        {cell("Attack type", atk ? atk.label : "—", atk ? atk.color : "var(--muted)")}
+        {cell(
+          "Injection detected",
+          src.injection_detected ? "YES — injection caught" : "No",
+          src.injection_detected ? "var(--bad)" : "var(--muted)",
+        )}
+        {cell(
+          "Target",
+          `${src.target_host ?? "—"}${src.resource ?? ""}`,
+        )}
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <div style={{ color: "var(--muted)", fontSize: 11, marginBottom: 4 }}>Settlement tx</div>
+        {src.settlement_tx ? (
+          <a
+            className="mono"
+            href={`${ARCSCAN_TX}${encodeURIComponent(src.settlement_tx)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--accent)", fontSize: 12.5, wordBreak: "break-all" }}
+          >
+            {src.settlement_tx}
+          </a>
+        ) : (
+          <span className="mono" style={{ color: "var(--muted)", fontSize: 12.5 }}>
+            not settled — the payment never went on-chain
           </span>
-        </div>
-      </div>
-
-      <div className="kv">
-        <div className="kv-key">Time</div>
-        <div className="kv-val mono">{fmtTime(verdict.decided_at)}</div>
-      </div>
-
-      {verdict.control && (
-        <div className="kv">
-          <div className="kv-key">Triggering Control</div>
-          <div className="kv-val mono">{verdict.control}</div>
-        </div>
-      )}
-
-      <div className="kv">
-        <div className="kv-key">Matched Attack</div>
-        <div className="kv-val mono">{verdict.matched_attack ?? "—"}</div>
-      </div>
-
-      <div className="kv">
-        <div className="kv-key">Injection Detected</div>
-        <div className="kv-val">
-          <span className={`flag ${verdict.injection_detected ? "on" : "off"}`}>
-            {verdict.injection_detected ? "YES — injection caught" : "No"}
-          </span>
-        </div>
-      </div>
-
-      <div className="kv">
-        <div className="kv-key">Target</div>
-        <div className="kv-val mono">
-          {verdict.target_host ?? "—"}
-          {verdict.resource ? verdict.resource : ""}
-        </div>
-      </div>
-
-      <div className="kv">
-        <div className="kv-key">Amount</div>
-        <div className="kv-val mono">{formatUsdc(verdict.amount_atomic)} USDC</div>
-      </div>
-
-      {verdict.protected_atomic && (
-        <div className="kv">
-          <div className="kv-key">Protected Amount</div>
-          <div className="kv-val mono">
-            {formatUsdc(verdict.protected_atomic)} USDC
-          </div>
-        </div>
-      )}
-
-      <div className="kv">
-        <div className="kv-key">Settlement Tx</div>
-        <div className="kv-val">
-          {verdict.settlement_tx ? (
-            <a
-              className="tx-link"
-              href={`${ARCSCAN_TX}${encodeURIComponent(verdict.settlement_tx)}`}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {verdict.settlement_tx}
-            </a>
-          ) : (
-            <span className="kv-val mono" style={{ color: "var(--text-faint)" }}>
-              not settled (payment never went on-chain)
-            </span>
-          )}
-        </div>
+        )}
       </div>
 
       {reasons.length > 0 && (
-        <div className="kv">
-          <div className="kv-key">Rationale</div>
-          <ul className="reasons">
+        <div style={{ marginTop: 16 }}>
+          <div style={{ color: "var(--muted)", fontSize: 11, marginBottom: 6 }}>Rationale</div>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.55 }}>
             {reasons.map((r, i) => (
               <li key={i}>{r}</li>
             ))}
